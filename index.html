@@ -1,22 +1,21 @@
 <!doctype html>
 <html lang="ru">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#f3f0e8">
-  <title>Расписание занятий</title>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#f5f7f2"><title>108М · учебный кабинет</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <main class="page">
-    <header class="page-header">
-      <h1>Расписание занятий</h1>
-      <div class="week-controls"><button id="prevWeek" aria-label="Предыдущая неделя">←</button><button id="weekTitle" title="Нажмите, чтобы вернуться к текущей неделе">Эта неделя</button><button id="nextWeek" aria-label="Следующая неделя">→</button></div>
-    </header>
-    <div class="table-wrap"><table class="schedule" aria-label="Расписание занятий на пять дней"><thead><tr id="dayHeaders"><th class="number-head">№</th></tr></thead><tbody id="scheduleBody"></tbody></table></div>
-    <section class="homework" id="tasksPanel" hidden><div class="homework-title"><h2>Задания</h2><button id="tasksToggle" aria-expanded="false">Скрыть</button></div><div id="taskContent"></div></section>
-    <button id="showTasks" class="show-tasks" aria-expanded="false"><span aria-hidden="true">✎</span> Задания <span id="taskBadge" hidden></span></button>
-  </main>
-  <script src="app.js"></script>
-</body>
-</html>
+  <div class="app-shell">
+    <header class="topbar"><div class="brand"><span class="brand-mark">108</span><span><b>учебный кабинет</b><small>группа 108М</small></span></div><span id="syncStatus" class="sync-status">проверяем данные…</span></header>
+    <main class="main-content">
+      <section class="hero"><p class="eyebrow">КГАМТ · 2026</p><h1 id="pageTitle">Расписание</h1><p id="pageIntro">Всё важное для учебной недели — в одном месте.</p></section>
+      <div id="view" aria-live="polite"></div>
+    </main>
+    <nav class="bottom-nav" aria-label="Разделы сайта">
+      <button class="nav-item active" data-view="schedule"><span>▦</span>Расписание</button><button class="nav-item" data-view="grades"><span>◒</span>Оценки</button><button class="nav-item" data-view="tasks"><span>✓</span>ДЗ</button><button class="nav-item" data-view="duties"><span>✦</span>Дежурства</button><button class="nav-item" data-view="replacements"><span>↗</span>Замены</button>
+    </nav>
+  </div><script src="app.js"></script>
+</body></html>

@@ -1,79 +1,20 @@
-const weekdays = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница'];
-const schedule = [
-  [
-    { name: 'Математика', teacher: 'Капаева', room: '2к302' },
-    { name: 'Иностранный язык', teacher: 'Шарипова, Шипанова', room: '2к207, 2к202' },
-    { name: 'ОБиЗР', teacher: 'Жукова', room: '2к407' },
-    { name: 'Русский язык', teacher: 'Маршинкина', room: '2к307' }
-  ],
-  [
-    { name: 'Введение в специальность', teacher: 'Мингажева' },
-    { name: 'Математика', teacher: 'Капаева', room: '2к302' },
-    { name: 'Химия', teacher: 'Мусина', room: '2к105' },
-    { name: 'Русский язык', teacher: 'Маршинкина', room: '2к307' }
-  ],
-  [
-    { name: 'Русский язык', teacher: 'Маршинкина', room: '2к307' },
-    { name: 'Русский язык', teacher: 'Маршинкина', room: '2к307' },
-    { name: 'Иностранный язык', teacher: 'Шарипова, Шипанова', room: '2к207, 2к202' },
-    { name: 'Родная литература', teacher: 'Садыкова', room: '2к301' }
-  ],
-  [
-    { name: 'Биология', teacher: 'Кипрова', room: 'Л307' },
-    { name: 'Информатика', teacher: 'Филенкова', room: '406' },
-    { name: 'История', teacher: 'Бятикова', room: '227', split: true },
-    { name: 'Информатика', teacher: 'Филенкова', room: '406', split: true }
-  ],
-  [
-    { name: 'Физическая культура', room: 'Спортзал', split: true },
-    { name: 'Математика', teacher: 'Капаева', room: '2к302', split: true },
-    { name: 'Физическая культура', teacher: 'Федосеев', room: 'Спортзал' },
-    { name: 'История', teacher: 'Бятикова', room: '227' }
-  ]
-];
-const state = { weekShift: 0, tasks: [] };
-const $ = selector => document.querySelector(selector);
-async function loadTasks() { try { const response = await fetch('tasks.json', { cache: 'no-store' }); return response.ok ? await response.json() : []; } catch { try { return JSON.parse(localStorage.getItem('planner-tasks') || '[]'); } catch { return []; } } }
-function getDates() {
-  const now = new Date();
-  const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - (now.getDay() + 6) % 7 + state.weekShift * 7);
-  return weekdays.map((_, i) => new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + i));
-}
-function formatDate(date, options = { day: 'numeric', month: 'short' }) { return date.toLocaleDateString('ru-RU', options).replace('.', ''); }
-function update() {
-  const dates = getDates();
-  if (!state.weekShift) $('#weekTitle').textContent = 'Эта неделя';
-  else $('#weekTitle').textContent = `${formatDate(dates[0])} — ${formatDate(dates[4])}`;
-  $('#dayHeaders').innerHTML = '<th class="number-head">№</th>' + dates.map((date, i) => {
-    const today = state.weekShift === 0 && date.toDateString() === new Date().toDateString();
-    return `<th class="${today ? 'today' : ''}">${weekdays[i]}<small>${formatDate(date)}</small>${today ? '<i>сегодня</i>' : ''}</th>`;
-  }).join('');
-  const maxLessons = Math.max(...schedule.map(day => day.length));
-  $('#scheduleBody').innerHTML = Array.from({ length: maxLessons }, (_, row) => `<tr><th class="lesson-no">${row + 1}</th>${schedule.map(day => {
-    const lesson = day[row];
-    if (!lesson) return '<td class="empty-cell"></td>';
-    return `<td><div class="subject">${escapeHtml(lesson.name)}</div>${lesson.teacher ? `<div class="teacher">${escapeHtml(lesson.teacher)}</div>` : ''}${lesson.room ? `<div class="room">${escapeHtml(lesson.room)}</div>` : ''}${lesson.split ? '<span class="split" title="Разделённая пара">½</span>' : ''}</td>`;
-  }).join('')}</tr>`).join('');
-  renderTasks(dates);
-}
-function renderTasks(dates) {
-  const keys = dates.map(date => `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`);
-  const tasks = state.tasks.filter(task => keys.includes(task.dueDay));
-  $('#taskBadge').hidden = tasks.length === 0;
-  $('#taskBadge').textContent = tasks.length || '';
-  $('#taskContent').innerHTML = tasks.length ? tasks.map(task => `<p><b>${escapeHtml(task.subject)}</b> — ${escapeHtml(task.text)} <small>${escapeHtml(task.dueLabel)}</small></p>`).join('') : '<p class="empty-tasks">Заданий пока нет. Они появятся здесь после добавления через Telegram-бота.</p>';
-}
-function escapeHtml(value) { return String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]); }
-$('#prevWeek').addEventListener('click', () => { state.weekShift--; update(); });
-$('#nextWeek').addEventListener('click', () => { state.weekShift++; update(); });
-$('#weekTitle').addEventListener('click', () => { state.weekShift = 0; update(); });
-function toggleTasks() {
-  const panel = $('#tasksPanel'); const open = panel.hidden;
-  panel.hidden = !open;
-  $('#showTasks').setAttribute('aria-expanded', String(open));
-  $('#tasksToggle').setAttribute('aria-expanded', String(open));
-}
-$('#showTasks').addEventListener('click', toggleTasks);
-$('#tasksToggle').addEventListener('click', toggleTasks);
-loadTasks().then(tasks => { state.tasks = Array.isArray(tasks) ? tasks : []; update(); });
-update();
+const state={view:'schedule',shift:0,data:{},status:'loading',error:''};
+const weekdays=['Понедельник','Вторник','Среда','Четверг','Пятница'];
+const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const $=s=>document.querySelector(s);
+const saved=k=>localStorage.getItem('108m_'+k);
+const save=(k,v)=>localStorage.setItem('108m_'+k,v);
+function weekDates(){const n=new Date(),m=new Date(n.getFullYear(),n.getMonth(),n.getDate()-((n.getDay()+6)%7)+state.shift*7);return weekdays.map((_,i)=>new Date(m.getFullYear(),m.getMonth(),m.getDate()+i));}
+function fmt(d){return d.toLocaleDateString('ru-RU',{day:'numeric',month:'short'}).replace('.','');}
+function weekType(d){const s=state.data.schedule||{}, meta=s.meta||{};const a=new Date(meta.weekAnchor||'2026-09-01');const n=Math.floor((d-a)/604800000);return (n+(meta.firstWeekType==='denominator'?1:0))%2===0?'numerator':'denominator';}
+async function fetchJson(file,rev){const r=await fetch('data/'+file+'?v='+encodeURIComponent(rev));if(!r.ok)throw Error(file);const x=await r.json();if(x.revision&&x.revision!==rev)throw Error('Версии данных не совпадают');return x;}
+async function load(){try{const r=await fetch('data/manifest.json?v='+Date.now());if(!r.ok)throw Error('manifest');const m=await r.json();const needed=['schedule.json','students.json','grades.json','tasks.json','duties.json','replacements.json'];for(const f of needed)if(m.files?.[f]!==undefined)state.data[f.slice(0,-5)]=await fetchJson(f,m.revision);state.status='ready';$('#syncStatus').textContent='обновлено '+(m.generatedAt?new Date(m.generatedAt).toLocaleDateString('ru-RU'):'недавно');}catch(e){state.status='error';state.error='Не удалось согласованно загрузить опубликованные данные.';$('#syncStatus').textContent='ошибка загрузки';}render();}
+function lessonFor(day,pair){const lessons=state.data.schedule?.lessons||[];const type=weekType(day);const found=lessons.filter(x=>x.weekday===day.getDay()||x.weekday===((day.getDay()+6)%7)+1).filter(x=>x.pairNumber===pair);return found.find(x=>x.weekType==='all'||x.weekType===type)||null;}
+function schedule(){const days=weekDates(),times=state.data.schedule?.times||[];return `<div class="card"><div class="toolbar"><h2>${state.shift?'Неделя '+fmt(days[0])+' — '+fmt(days[4]):'Эта неделя'}</h2><div class="controls"><button class="button" data-action="prev" aria-label="Предыдущая неделя">←</button><button class="button" data-action="today">Сегодня</button><button class="button" data-action="next" aria-label="Следующая неделя">→</button></div></div><div class="schedule-wrap"><table class="schedule"><thead><tr><th class="no">№</th>${days.map((d,i)=>`<th class="${!state.shift&&d.toDateString()===new Date().toDateString()?'today':''}">${weekdays[i]}<small>${fmt(d)}</small></th>`).join('')}</tr></thead><tbody>${times.map(t=>`<tr><th class="no">${t.pairNumber}<small>${esc(t.start)}–${esc(t.end)}</small></th>${days.map(d=>{const x=lessonFor(d,t.pairNumber);if(!x)return '<td>—</td>';const eng=x.subjectId==='english';return `<td><div class="subject">${esc(x.subject)}</div>${x.teacher?`<div class="teacher">${esc(x.teacher)}</div>`:''}${x.room?`<div class="room">${esc(x.room)}</div>`:''}${eng?'<span class="tag">2к207 / 2к202</span>':''}${x.weekType!=='all'?`<span class="week-tag">${x.weekType==='numerator'?'числитель':'знаменатель'}</span>`:''}</td>`}).join('')}</tr>`).join('')}</tbody></table></div></div>`;}
+function empty(text='Нет опубликованных данных.') {return `<div class="notice">${esc(text)}<br><small>Данные появятся после публикации через Telegram-бота.</small></div>`;}
+function grades(){const g=state.data.grades?.grades||state.data.grades?.items||[];if(!g.length)return empty();return `<div class="card"><div class="filters"><select id="studentFilter"><option value="">Все ученики</option>${(state.data.students?.students||[]).map(s=>`<option value="${esc(s.studentId)}">${esc(s.name)}</option>`).join('')}</select></div><div class="list">${g.map(x=>`<div class="row"><span><strong>${esc(x.subject||x.subjectId)}</strong><small>${esc(x.lessonDate||'')} · ${esc(x.entryType||'daily')}</small></span><span class="grade ${x.status==='conflict'||x.status==='pending'?'badge':''}">${esc(x.value)}</span></div>`).join('')}</div></div>`;}
+function tasks(){const a=state.data.tasks?.tasks||state.data.tasks||[];return a.length?`<div class="card list">${a.map(x=>`<article class="row"><span><strong>${esc(x.subject)}</strong><small>${esc(x.text)} · следующий урок: ${esc(x.nextLessonDate||'не указан')}</small></span><span>${esc(x.status||'актуальное')}</span></article>`).join('')}</div>`:empty();}
+function duties(){const d=state.data.duties?.days||state.data.duties?.items||[];return d.length?`<div class="card list">${d.map(x=>`<div class="row"><span><strong>${esc(x.date)}</strong><small>Выбраны: ${esc((x.selected||[]).join(', '))}</small></span><span>${esc(x.status||'ожидает проверки')}</span></div>`).join('')}</div>`:empty();}
+function replacements(){const a=state.data.replacements?.items||state.data.replacements||[];return a.length?`<div class="card list">${a.map(x=>`<div class="row"><span><strong>${esc(x.date)} · ${esc(x.newSubject||x.subject||'Замена')}</strong><small>${esc(x.originalSubject||'Обычное расписание')} → ${esc(x.room||'кабинет не указан')}</small></span><small>${esc(x.source||'источник не указан')}</small></div>`).join('')}</div>`:empty();}
+function render(){const titles={schedule:['Расписание','Всё важное для учебной недели — в одном месте.'],grades:['Оценки','Выберите ученика и следите за результатами.'],tasks:['Домашние задания','Задания привязаны к ближайшему уроку.'],duties:['Дежурства','Выбранные и подтверждённые дежурства.'],replacements:['Замены','Изменения расписания на выбранную дату.']};const t=titles[state.view];$('#pageTitle').textContent=t[0];$('#pageIntro').textContent=t[1];document.querySelectorAll('.nav-item').forEach(x=>x.classList.toggle('active',x.dataset.view===state.view));$('#view').innerHTML=state.status==='loading'?'<div class="card loading">Загрузка опубликованных данных…</div>':state.status==='error'?`<div class="card notice">${esc(state.error)}<br><button class="button" data-action="retry">Повторить</button></div>`:({schedule,grades,tasks,duties,replacements}[state.view]());}
+document.addEventListener('click',e=>{const a=e.target.closest('[data-action]')?.dataset.action;if(a==='prev')state.shift--;if(a==='next')state.shift++;if(a==='today')state.shift=0;if(a==='retry'){state.status='loading';render();load();return}if(a)render();});document.querySelectorAll('.nav-item').forEach(b=>b.addEventListener('click',()=>{state.view=b.dataset.view;render();}));render();load();
