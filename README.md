@@ -41,7 +41,6 @@ python bot.py
 | `VK_GROUP_ID` | — | Числовой id сообщества без минуса |
 | `VK_ACCESS_TOKEN` | — | Сервисный токен VK для чтения стены |
 | `BOT_STATE_FILE` | `bot_state.local.json` | Локальные отметки, не публикуется |
-| `MEDIA_RELEASE_TAG` | `homework-media` | Зарезервировано для медиа |
 | `LOG_LEVEL` | `INFO` | Уровень логов |
 
 `VK_GROUP_ID` и `VK_ACCESS_TOKEN` нужны только для автоматического импорта замен в 20:00.

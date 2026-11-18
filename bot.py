@@ -172,7 +172,6 @@ class Config:
     gemini_rpd_limit: int = 20
     gemini_tpm_limit: int = 250_000
     bot_state_file: Path = Path("bot_state.local.json")
-    media_release_tag: str = "homework-media"
     log_level: str = "INFO"
 
     @property
@@ -259,7 +258,6 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         gemini_rpd_limit=_env_int(source, "GEMINI_RPD_LIMIT", 20),
         gemini_tpm_limit=_env_int(source, "GEMINI_TPM_LIMIT", 250_000, minimum=1000),
         bot_state_file=Path(_env_text(source, "BOT_STATE_FILE", "bot_state.local.json")),
-        media_release_tag=_env_text(source, "MEDIA_RELEASE_TAG", "homework-media"),
         log_level=_env_text(source, "LOG_LEVEL", "INFO").upper(),
     )
 
@@ -3039,6 +3037,11 @@ class BotScheduler:
         if not self.catch_up_done:
             await self.run_maintenance(today)
             self.catch_up_done = True
+            if now.hour >= 20:
+                marker = f"vkImportDone:{today.isoformat()}"
+                if not self.backend.local.get(marker):
+                    self.backend.local.set(marker, iso_now())
+                    await self.run_vk_import(today)
         if now.hour == 0:
             marker = f"midnightDone:{today.isoformat()}"
             if not self.backend.local.get(marker):
@@ -4717,7 +4720,11 @@ async def handle_text(update: Any, context: Any) -> None:
             documents,
         )
         if result.status == "confirmed":
-            lines = ["Отчёт принят: " + ", ".join(result.added_names or result.names) + "."]
+            added = result.added_names or []
+            lines = [
+                "Отчёт принят: " + ", ".join(added) + "."
+                if added else "Этот отчёт уже учтён; повторно имена не добавляю."
+            ]
             if result.all_names and set(result.all_names) != set(result.names):
                 lines.append("Итого за сегодня: " + ", ".join(result.all_names) + ".")
             lines.append("Засчитаю всех упомянутых при закрытии дня. Счётчики обновятся после 00:00.")
