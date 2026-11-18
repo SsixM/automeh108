@@ -1,0 +1,10 @@
+{
+  "name": "automeh108",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Static planner for KGAMT group 108M; no build step.",
+  "scripts": {
+    "test": "node --test tests/js/frontend.test.cjs",
+    "serve": "python -m http.server 8080"
+  }
+}
