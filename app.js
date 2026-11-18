@@ -419,6 +419,36 @@
     return 'актуальное';
   }
 
+  function pairNumberFor(isoDate, lessonId) {
+    const lesson = findLessonOnDate(isoDate, lessonId, null);
+    return lesson ? lesson.pairNumber : 0;
+  }
+
+  function safeHttpsUrl(value) {
+    try {
+      const url = new URL(String(value));
+      return url.protocol === 'https:' ? url.href : '';
+    } catch {
+      return '';
+    }
+  }
+
+  function renderAttachments(attachments) {
+    if (!Array.isArray(attachments) || !attachments.length) return '';
+    const items = attachments.map((attachment) => {
+      const url = safeHttpsUrl(attachment && attachment.url);
+      if (!url) return '';
+      const width = Number(attachment.width) > 0 ? Number(attachment.width) : 1200;
+      const height = Number(attachment.height) > 0 ? Number(attachment.height) : 900;
+      const label = `Фото к заданию${attachment.fileName ? `: ${attachment.fileName}` : ''}`;
+      return `<a class="task-attachment" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" aria-label="${escapeHtml(label)}">
+        <img src="${escapeHtml(url)}" alt="${escapeHtml(label)}" width="${width}" height="${height}" loading="lazy" decoding="async">
+      </a>`;
+    }).filter(Boolean);
+    if (!items.length) return '';
+    return `<div class="task-attachments">${items.join('')}</div>`;
+  }
+
   function dutyReason(day) {
     if (!day) return 'выбор ещё не опубликован';
     if (day.status === 'closed' || day.status === 'closed-without-confirmation') {
@@ -1007,21 +1037,30 @@
 
     const groups = new Map();
     for (const task of visible) {
-      if (!groups.has(task.nextLessonDate)) groups.set(task.nextLessonDate, []);
-      groups.get(task.nextLessonDate).push(task);
+      const key = `${task.nextLessonDate}|${task.nextLessonId}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(task);
     }
-    const sortedGroups = [...groups.entries()].sort((left, right) => left[0].localeCompare(right[0]));
-    const groupCards = sortedGroups.map(([isoDate, groupTasks]) => {
+    const sortedGroups = [...groups.entries()].sort((left, right) => {
+      const [leftDate, leftLesson] = left[0].split('|');
+      const [rightDate, rightLesson] = right[0].split('|');
+      if (leftDate !== rightDate) return leftDate.localeCompare(rightDate);
+      return pairNumberFor(leftDate, leftLesson) - pairNumberFor(rightDate, rightLesson);
+    });
+    const groupCards = sortedGroups.map(([key, groupTasks]) => {
+      const [isoDate, lessonId] = key.split('|');
       const date = parseISODate(isoDate);
-      const lesson = findLessonOnDate(isoDate, groupTasks[0].nextLessonId, groupTasks[0].subjectId);
+      const lesson = findLessonOnDate(isoDate, lessonId, groupTasks[0].subjectId);
       const time = lesson ? timesByPair().get(lesson.pairNumber) : null;
-      return `<section class="task-group" aria-labelledby="task-date-${escapeHtml(isoDate)}">
+      const when = date ? `${escapeHtml(formatWeekday(date))}, ${escapeHtml(formatDateLong(date))}` : escapeHtml(isoDate);
+      return `<section class="task-group" aria-labelledby="task-${escapeHtml(key.replace('|', '-'))}">
         <header class="task-date-head">
           <div>
             <p class="eyebrow">Следующий урок</p>
-            <h2 id="task-date-${escapeHtml(isoDate)}">${date ? `${escapeHtml(formatWeekday(date))}, ${escapeHtml(formatDateLong(date))}` : escapeHtml(isoDate)}</h2>
+            <h2 id="task-${escapeHtml(key.replace('|', '-'))}">${escapeHtml(groupTasks[0].subject)}</h2>
+            <p class="task-date-line">${when}${lesson ? ` · ${escapeHtml(lesson.pairNumber)} пара${time ? ` · ${escapeHtml(time.start)}–${escapeHtml(time.end)}` : ''}${lesson.room ? ` · каб. ${escapeHtml(lesson.room)}` : ''}` : ''}</p>
           </div>
-          ${lesson ? `<span class="task-lesson-meta">${escapeHtml(lesson.pairNumber)} пара${time ? ` · ${escapeHtml(time.start)}–${escapeHtml(time.end)}` : ''}${lesson.room ? ` · каб. ${escapeHtml(lesson.room)}` : ''}</span>` : ''}
+          ${groupTasks.length > 1 ? `<span class="count-chip">${escapeHtml(groupTasks.length)} ${escapeHtml(plural(groupTasks.length, 'задание', 'задания', 'заданий'))}</span>` : ''}
         </header>
         <div class="task-list">
           ${groupTasks.map((task) => `<article class="card task-card">
@@ -1030,6 +1069,7 @@
               ${taskStatusChip(task.displayStatus)}
             </div>
             <p class="task-text">${escapeHtml(task.text)}</p>
+            ${renderAttachments(task.attachments)}
             <div class="task-meta">
               <span>Выдано: ${escapeHtml(formatTaskDate(task.assignedDate))}</span>
               ${task.movedByReplacement ? '<span class="task-moved">перенесено из-за замены</span>' : ''}

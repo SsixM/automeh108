@@ -119,7 +119,7 @@ def test_homework_rejects_two_subjects_and_empty_text(service) -> None:
         )
 
 
-def test_homework_add_duplicate_and_update(service) -> None:
+def test_homework_duplicate_and_second_text_appends(service) -> None:
     homework, storage, docs = service
     first = homework.add(
         "Математика выучить логарифмы",
@@ -141,17 +141,18 @@ def test_homework_add_duplicate_and_update(service) -> None:
     assert duplicate.status == "duplicate"
     assert len(storage.docs["tasks.json"]["tasks"]) == 1
 
-    updated = homework.add(
+    second = homework.add(
         "Математика выучить логарифмы и степени",
         1001,
         12,
         date(2026, 11, 17),
         docs,
     )
-    assert updated.status == "updated"
+    assert second.status == "added"
+    assert second.siblings == 1
     tasks = storage.docs["tasks.json"]["tasks"]
-    assert len(tasks) == 1
-    assert tasks[0]["text"] == "выучить логарифмы и степени"
+    assert len(tasks) == 2
+    assert {task["text"] for task in tasks} == {"выучить логарифмы", "выучить логарифмы и степени"}
 
 
 def test_repeated_telegram_update_does_not_change_task(service) -> None:
@@ -161,6 +162,66 @@ def test_repeated_telegram_update_does_not_change_task(service) -> None:
     repeated = homework.add("Математика выучить логарифмы", 1001, 42, date(2026, 11, 17), docs)
     assert repeated.status == "duplicate"
     assert storage.docs["tasks.json"] == before
+
+
+def test_attachment_is_added_once_and_photo_only_task(service) -> None:
+    homework, storage, docs = service
+    attachment = {
+        "attachmentId": "att-" + "a" * 20,
+        "url": "https://raw.githubusercontent.com/SsixM/automeh108/main/media/homework/x.webp",
+        "fileName": "homework.webp",
+        "mimeType": "image/webp",
+        "size": 1024,
+        "width": 800,
+        "height": 600,
+        "sha256": "a" * 64,
+        "createdAt": "2026-11-17T12:00:00+03:00",
+    }
+    first = homework.add(
+        "Математика выучить логарифмы",
+        1001,
+        30,
+        date(2026, 11, 17),
+        docs,
+        attachments=[attachment],
+    )
+    assert first.status == "added"
+    task = storage.docs["tasks.json"]["tasks"][0]
+    assert task["attachments"][0]["attachmentId"] == attachment["attachmentId"]
+
+    repeated = homework.add(
+        "Математика выучить логарифмы",
+        1001,
+        31,
+        date(2026, 11, 17),
+        docs,
+        attachments=[attachment],
+    )
+    assert repeated.status == "duplicate"
+    assert len(storage.docs["tasks.json"]["tasks"][0]["attachments"]) == 1
+
+    second_attachment = {**attachment, "attachmentId": "att-" + "b" * 20, "sha256": "b" * 64}
+    attached = homework.add(
+        "Математика выучить логарифмы",
+        1001,
+        32,
+        date(2026, 11, 17),
+        docs,
+        attachments=[second_attachment],
+    )
+    assert attached.status == "attached"
+    assert len(storage.docs["tasks.json"]["tasks"][0]["attachments"]) == 2
+
+    photo_only = homework.add(
+        "Химия",
+        1001,
+        33,
+        date(2026, 11, 17),
+        docs,
+        allow_empty_text=True,
+    )
+    assert photo_only.status == "added"
+    assert photo_only.draft.text == "Задание на фото"
 
 
 def test_homework_skips_cancelled_lesson(service) -> None:

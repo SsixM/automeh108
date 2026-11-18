@@ -110,6 +110,7 @@ def test_duties_initial_state_has_all_students_at_zero(data_dir: Path) -> None:
     assert set(duties["students"]) == {student["studentId"] for student in students}
     assert all(record["count"] == 0 for record in duties["students"].values())
     assert duties["days"] == []
+    assert duties["pairPreferences"] == []
 
 
 def test_no_invented_grades_tasks_or_replacements(data_dir: Path) -> None:

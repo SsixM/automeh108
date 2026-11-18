@@ -228,6 +228,78 @@ def test_weekend_selection_is_rejected(service) -> None:
         duties.select_for(date(2026, 11, 21), docs["students.json"], docs["duties.json"])
 
 
+def test_selection_picks_preferred_pair_inside_minimum_layer(service) -> None:
+    duties, _, docs = service
+    all_zero(docs)
+    docs["duties.json"]["pairPreferences"] = [["s04", "s09"]]
+    selected = duties.select_for(date(2026, 11, 18), docs["students.json"], docs["duties.json"])
+    assert set(selected) == {"s04", "s09"}
+
+
+def test_selection_allows_partner_one_layer_above(service) -> None:
+    duties, _, docs = service
+    all_zero(docs)
+    for student_id in docs["duties.json"]["students"]:
+        docs["duties.json"]["students"][student_id]["count"] = 1
+    docs["duties.json"]["students"]["s04"]["count"] = 0
+    docs["duties.json"]["pairPreferences"] = [["s04", "s09"]]
+    selected = duties.select_for(date(2026, 11, 18), docs["students.json"], docs["duties.json"])
+    assert set(selected) == {"s04", "s09"}
+
+
+def test_selection_does_not_force_partner_far_above_minimum(service) -> None:
+    duties, _, docs = service
+    all_zero(docs)
+    docs["duties.json"]["students"]["s04"]["count"] = 0
+    docs["duties.json"]["students"]["s09"]["count"] = 3
+    for student_id in docs["duties.json"]["students"]:
+        if student_id not in {"s04", "s09"}:
+            docs["duties.json"]["students"][student_id]["count"] = 1
+    docs["duties.json"]["pairPreferences"] = [["s04", "s09"]]
+    selected = duties.select_for(date(2026, 11, 18), docs["students.json"], docs["duties.json"])
+    assert "s04" in selected
+    assert "s09" not in selected
+
+
+def test_pair_command_persists_and_removes(service) -> None:
+    duties, storage, docs = service
+    names, changed = duties.update_pair(["Абакаев", "Бадреев"], docs["students.json"], docs)
+    assert changed is True
+    assert names == ["Абакаев Артем", "Бадреев Айдар"]
+    assert storage.docs["duties.json"]["pairPreferences"] == [["s26", "s03"]]
+    names, changed = duties.update_pair(["Абакаев", "Бадреев"], docs["students.json"], docs)
+    assert changed is False
+    names, changed = duties.update_pair(["Абакаев", "Бадреев"], docs["students.json"], docs, remove=True)
+    assert changed is True
+    assert storage.docs["duties.json"]["pairPreferences"] == []
+
+
+def test_pair_command_rejects_ambiguous_and_same_student(service) -> None:
+    duties, _, docs = service
+    with pytest.raises(bot.UserFacingError, match="однозначно"):
+        duties.update_pair(["Максим", "Бадреев"], docs["students.json"], docs)
+    with pytest.raises(bot.UserFacingError, match="два разных"):
+        duties.update_pair(["Бадреев", "Бадреев"], docs["students.json"], docs)
+
+
+def test_close_unions_two_reports(service) -> None:
+    duties, storage, docs = service
+    all_zero(docs)
+    duties.ensure_day(date(2026, 11, 18), docs)
+    duties.add_report(date(2026, 11, 18), "Дежурили Абакаев, Бадреев", 1001, 20, docs)
+    second = duties.add_report(date(2026, 11, 18), "Дежурили Осадчий", 1001, 21, docs)
+    assert second.all_names == ["Абакаев Артем", "Бадреев Айдар", "Осадчий Максим"]
+    assert second.added_names == ["Осадчий Максим"]
+    result = duties.close_day(date(2026, 11, 18), docs)
+    assert result.status == "closed"
+    assert set(result.names) == {"Абакаев Артем", "Бадреев Айдар", "Осадчий Максим"}
+    counts = {sid: record["count"] for sid, record in storage.docs["duties.json"]["students"].items()}
+    assert counts["s26"] == 1
+    assert counts["s03"] == 1
+    assert counts["s16"] == 1
+    assert sum(counts.values()) == 3
+
+
 def test_scheduler_closes_past_and_creates_today(service, tmp_path: Path) -> None:
     duties, storage, docs = service
     all_zero(docs)

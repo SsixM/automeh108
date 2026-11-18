@@ -22,6 +22,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
@@ -94,16 +95,22 @@ DUTY_STATUSES = (
 )
 PROMPT_VERSION = "journal-recognition-v1"
 RECOGNITION_SCHEMA_VERSION = "journal-recognition-v1"
-DUTY_ALGORITHM_VERSION = "sha256-layered-v1"
+DUTY_ALGORITHM_VERSION = "sha256-layered-v2-pairs"
+MEDIA_DIR = "media/homework"
+MAX_ATTACHMENT_BYTES = 8_388_608
+MAX_HOMEWORK_IMAGE_SIDE = 1_600
+MAX_PDF_BYTES = 10 * 1024 * 1024
+VK_API_VERSION = "5.199"
+VK_ALLOWED_HOST_SUFFIXES = (
+    "vk.com", "vkuser.net", "userapi.com", "vk-cdn.net", "mycdn.me",
+)
 
 DEFAULT_GEMINI_MODELS = (
-    "gemini-3.8-flash",
-    "gemini-3.6-flash",
-    "gemini-3.5-flash-lite",
-    "gemini-3-flash",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.0-flash",
 )
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
-MAX_PDF_BYTES = 16 * 1024 * 1024
 MAX_BATCH_FILES = 20
 BATCH_IDLE_SECONDS = 8.0
 BATCH_MAX_AGE_SECONDS = 180.0
@@ -165,6 +172,7 @@ class Config:
     gemini_rpd_limit: int = 20
     gemini_tpm_limit: int = 250_000
     bot_state_file: Path = Path("bot_state.local.json")
+    media_release_tag: str = "homework-media"
     log_level: str = "INFO"
 
     @property
@@ -251,6 +259,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         gemini_rpd_limit=_env_int(source, "GEMINI_RPD_LIMIT", 20),
         gemini_tpm_limit=_env_int(source, "GEMINI_TPM_LIMIT", 250_000, minimum=1000),
         bot_state_file=Path(_env_text(source, "BOT_STATE_FILE", "bot_state.local.json")),
+        media_release_tag=_env_text(source, "MEDIA_RELEASE_TAG", "homework-media"),
         log_level=_env_text(source, "LOG_LEVEL", "INFO").upper(),
     )
 
@@ -675,6 +684,7 @@ def validate_tasks_document(document: Any) -> None:
                 "taskId", "subjectId", "subject", "text", "assignedDate", "nextLessonDate",
                 "nextLessonId", "status", "createdAt", "updatedAt", "sourceUserId",
                 "sourceUpdateId", "originalNextLessonDate", "movedByReplacement", "completedAt",
+                "attachments",
             },
         )
         task_id = _string(task["taskId"], f"{where}.taskId", min_length=8)
@@ -698,6 +708,36 @@ def validate_tasks_document(document: Any) -> None:
             _boolean(task["movedByReplacement"], f"{where}.movedByReplacement")
         if "completedAt" in task:
             _iso_datetime(task["completedAt"], f"{where}.completedAt")
+        if "attachments" in task:
+            attachments = _list(task["attachments"], f"{where}.attachments", 0, 6)
+            attachment_ids: set[str] = set()
+            for attachment_index, item in enumerate(attachments):
+                attachment_where = f"{where}.attachments[{attachment_index}]"
+                attachment = _object(
+                    item,
+                    attachment_where,
+                    {"attachmentId", "url", "fileName", "mimeType", "size", "sha256", "createdAt"},
+                    {
+                        "attachmentId", "url", "fileName", "mimeType", "size", "sha256",
+                        "createdAt", "width", "height",
+                    },
+                )
+                attachment_id = _string(attachment["attachmentId"], f"{attachment_where}.attachmentId", min_length=8)
+                _schema(attachment_id not in attachment_ids, f"{attachment_where}.attachmentId: повторяется")
+                attachment_ids.add(attachment_id)
+                url = _string(attachment["url"], f"{attachment_where}.url", min_length=12)
+                _schema(url.startswith("https://"), f"{attachment_where}.url: нужен https")
+                _string(attachment["fileName"], f"{attachment_where}.fileName", min_length=1)
+                _schema(len(attachment["fileName"]) <= 120, f"{attachment_where}.fileName: слишком длинное")
+                _enum(attachment["mimeType"], f"{attachment_where}.mimeType", ("image/jpeg", "image/png", "image/webp"))
+                _integer(attachment["size"], f"{attachment_where}.size", 1, 8_388_608)
+                sha = _string(attachment["sha256"], f"{attachment_where}.sha256", min_length=64)
+                _schema(bool(re.fullmatch(r"[a-f0-9]{64}", sha)), f"{attachment_where}.sha256: ожидался hex")
+                _iso_datetime(attachment["createdAt"], f"{attachment_where}.createdAt")
+                if "width" in attachment:
+                    _integer(attachment["width"], f"{attachment_where}.width", 1, 20_000)
+                if "height" in attachment:
+                    _integer(attachment["height"], f"{attachment_where}.height", 1, 20_000)
 
 
 def _validate_student_id_array(value: Any, where: str, min_items: int = 0) -> list[str]:
@@ -712,8 +752,22 @@ def _validate_student_id_array(value: Any, where: str, min_items: int = 0) -> li
 
 
 def validate_duties_document(document: Any) -> None:
-    root = _root(document, "duties.json", {"group", "students", "days"})
+    root = _root(document, "duties.json", {"group", "students", "days", "pairPreferences"})
     _schema(root.get("group") == GROUP_NAME, "duties.json.group: ожидалась группа 108М")
+    preferences = _list(root.get("pairPreferences", []), "duties.json.pairPreferences", 0, 200)
+    seen_pairs: set[tuple[str, str]] = set()
+    for index, pair in enumerate(preferences):
+        where = f"duties.json.pairPreferences[{index}]"
+        items = _list(pair, where, 2, 2)
+        student_ids = [_string(item, f"{where}[{item_index}]", min_length=3) for item_index, item in enumerate(items)]
+        for student_id in student_ids:
+            _schema(bool(re.fullmatch(r"s\d{2}", student_id)), f"{where}: ожидался studentId вида sNN")
+        if len(set(student_ids)) != 2:
+            raise SchemaError(f"{where}: нужны два разных ученика")
+        key = tuple(sorted(student_ids))
+        if key in seen_pairs:
+            raise SchemaError(f"{where}: пара повторяется")
+        seen_pairs.add(key)
     records = _object(root.get("students"), "duties.json.students", set(), None)
     for student_id, record in records.items():
         _schema(bool(re.fullmatch(r"s\d{2}", str(student_id))), "duties.json.students: ключ должен быть sNN")
@@ -927,7 +981,7 @@ def empty_document(name: str, revision: str = "bootstrap") -> dict[str, Any]:
     if name == "tasks.json":
         return {**base, "tasks": []}
     if name == "duties.json":
-        return {**base, "group": GROUP_NAME, "students": {}, "days": []}
+        return {**base, "group": GROUP_NAME, "students": {}, "days": [], "pairPreferences": []}
     if name == "replacements.json":
         return {**base, "items": []}
     if name == "reviews.json":
@@ -952,6 +1006,10 @@ def validate_bundle(documents: Mapping[str, dict[str, Any]], manifest: dict[str,
         for item in documents[name].get("grades", documents[name].get("items", [])):
             if item["studentId"] not in student_ids:
                 raise SchemaError(f"{name}: неизвестный studentId")
+    for pair in documents["duties.json"].get("pairPreferences", []):
+        for student_id in pair:
+            if student_id not in student_ids:
+                raise SchemaError("duties.json: неизвестный studentId в паре дежурств")
     for day in documents["duties.json"]["days"]:
         for student_id in list(day["selected"]) + list(day["actual"]):
             if student_id not in student_ids:
@@ -1340,6 +1398,43 @@ class GitHubStorage:
         content = response.get("content") if isinstance(response, dict) else None
         return str(content.get("sha", "")) if isinstance(content, dict) else ""
 
+    def _media_url(self, path: str) -> str:
+        repo = self.config.github_repository.strip("/")
+        return f"https://raw.githubusercontent.com/{repo}/{self.config.github_branch}/{path}"
+
+    def _media_contents_url(self, path: str) -> str:
+        repo_api = self.api_root.rsplit("/contents", 1)[0]
+        return f"{repo_api}/contents/{quote(path, safe='/')}"
+
+    def upload_media(self, data: bytes, extension: str, sha256: str) -> str:
+        """Опубликовать изображение ДЗ отдельным файлом и вернуть публичный URL.
+
+        Журнальные фотографии сюда не попадают: метод вызывается только для
+        вложений домашних заданий с явной подписью.
+        """
+        if not data:
+            raise UserFacingError("Пустое изображение.")
+        if len(data) > MAX_ATTACHMENT_BYTES:
+            raise UserFacingError("Вложение слишком большое (максимум 8 МБ).")
+        ext = "webp" if extension.lower() == "webp" else "jpg"
+        path = f"{MEDIA_DIR}/{sha256[:32]}.{ext}"
+        url = self._media_url(path)
+        api_url = self._media_contents_url(path)
+        status, response = self._call("GET", api_url + "?" + urlencode({"ref": self.config.github_branch}), allow_not_found=True)
+        if status != 404 and response is not None:
+            return url
+        body = {
+            "message": f"108M: homework attachment {sha256[:12]}",
+            "content": base64.b64encode(data).decode("ascii"),
+            "branch": self.config.github_branch,
+        }
+        try:
+            self._call("PUT", api_url, body=body)
+        except StorageConflict:
+            # Параллельная загрузка того же файла: имя детерминировано по hash.
+            return url
+        return url
+
     def read_bundle(self, strict: bool = True) -> Bundle:
         with self.lock:
             manifest_raw, manifest_sha = self._read_json(MANIFEST_FILE)
@@ -1412,11 +1507,33 @@ class GitHubStorage:
         event_id: str,
         message: str,
     ) -> PublishResult:
-        if not event_id or not re.fullmatch(r"[A-Za-z0-9_.:-]{3,120}", event_id):
-            raise ValueError("event_id должен быть безопасной короткой строкой")
         unknown = set(mutators) - set(DATA_FILES)
         if unknown:
             raise ValueError(f"Неизвестные файлы для записи: {', '.join(sorted(unknown))}")
+
+        def apply_all(documents: dict[str, dict[str, Any]]) -> None:
+            for name, mutator in mutators.items():
+                mutator(documents[name])
+
+        return self._publish_internal(apply_all, event_id, message)
+
+    def publish_all(
+        self,
+        mutator: Callable[[dict[str, dict[str, Any]]], None],
+        event_id: str,
+        message: str,
+    ) -> PublishResult:
+        """Атомарно (в рамках CAS-повтора) изменить несколько файлов сразу."""
+        return self._publish_internal(mutator, event_id, message)
+
+    def _publish_internal(
+        self,
+        apply_all: Callable[[dict[str, dict[str, Any]]], None],
+        event_id: str,
+        message: str,
+    ) -> PublishResult:
+        if not event_id or not re.fullmatch(r"[A-Za-z0-9_.:-]{3,120}", event_id):
+            raise ValueError("event_id должен быть безопасной короткой строкой")
         commit_text = CONTROL_RE.sub(" ", str(message or "update")).strip()[:60] or "update"
         suffix = event_id[:12]
         with self.lock:
@@ -1425,8 +1542,8 @@ class GitHubStorage:
                 try:
                     bundle = self.read_bundle(strict=False)
                     documents = clone_json(bundle.documents)
-                    for name, mutator in mutators.items():
-                        mutator(documents[name])
+                    apply_all(documents)
+                    for name in DATA_FILES:
                         validate_document(name, documents[name])
                     unchanged = documents == bundle.documents
                     if unchanged and bundle.consistent:
@@ -1738,7 +1855,9 @@ class HomeworkDraft:
 
     @property
     def task_id(self) -> str:
-        return stable_hash(f"{self.subject_id}|{self.assigned_date.isoformat()}")[:24]
+        return stable_hash(
+            f"{self.subject_id}|{self.assigned_date.isoformat()}|{normalize_text(self.text)}"
+        )[:24]
 
     @property
     def next_lesson_date(self) -> str:
@@ -1750,10 +1869,19 @@ class HomeworkDraft:
 
 
 class HomeworkResult:
-    def __init__(self, status: str, draft: HomeworkDraft, existing_text: str | None = None):
-        self.status = status  # added | updated | duplicate
+    def __init__(
+        self,
+        status: str,
+        draft: HomeworkDraft,
+        existing_text: str | None = None,
+        siblings: int = 0,
+        attachment_added: bool = False,
+    ):
+        self.status = status  # added | attached | duplicate
         self.draft = draft
         self.existing_text = existing_text
+        self.siblings = siblings
+        self.attachment_added = attachment_added
 
 
 class HomeworkService:
@@ -1856,6 +1984,7 @@ class HomeworkService:
         assigned: date,
         schedule_doc: dict[str, Any],
         replacements_doc: dict[str, Any] | None,
+        allow_empty_text: bool = False,
     ) -> HomeworkDraft:
         if len(text) > 1000:
             raise UserFacingError("Сообщение слишком длинное для домашнего задания.")
@@ -1863,7 +1992,9 @@ class HomeworkService:
         assigned_date, homework = self._extract_date(remaining, assigned)
         homework = SPACE_RE.sub(" ", homework).strip()
         if not homework:
-            raise UserFacingError("После предмета напиши текст задания. Например: «Математика выучить логарифмы 10.09».")
+            if not allow_empty_text:
+                raise UserFacingError("После предмета напиши текст задания. Например: «Математика выучить логарифмы 10.09».")
+            homework = "Задание на фото"
         next_lesson = self.schedule.next_lesson(subject_id, assigned_date, schedule_doc, replacements_doc)
         if next_lesson is None:
             raise UserFacingError("Не нашёл следующий урок этого предмета в расписании. Сообщение не сохранено.")
@@ -1886,50 +2017,52 @@ class HomeworkService:
         update_id: int | None,
         assigned: date,
         documents: dict[str, dict[str, Any]],
+        attachments: list[dict[str, Any]] | None = None,
+        allow_empty_text: bool = False,
     ) -> HomeworkResult:
-        draft = self.parse(text, assigned, documents["schedule.json"], documents["replacements.json"])
+        draft = self.parse(
+            text,
+            assigned,
+            documents["schedule.json"],
+            documents["replacements.json"],
+            allow_empty_text=allow_empty_text,
+        )
         result_holder: dict[str, Any] = {}
 
         def mutate(tasks_doc: dict[str, Any]) -> None:
             tasks = tasks_doc.setdefault("tasks", [])
-            existing = next((task for task in tasks if task.get("taskId") == draft.task_id), None)
-            if existing is None:
-                existing = next(
-                    (
-                        task for task in tasks
-                        if task.get("subjectId") == draft.subject_id
-                        and task.get("assignedDate") == draft.assigned_date.isoformat()
-                    ),
-                    None,
-                )
+            existing = next(
+                (
+                    task for task in tasks
+                    if task.get("subjectId") == draft.subject_id
+                    and task.get("assignedDate") == draft.assigned_date.isoformat()
+                    and task.get("nextLessonId") == draft.next_lesson_id
+                    and normalize_text(task.get("text", "")) == normalize_text(draft.text)
+                ),
+                None,
+            )
             now = iso_now()
             if existing is not None:
-                same_update = update_id is not None and existing.get("sourceUpdateId") == update_id
-                same_text = existing.get("text") == draft.text
-                same_lesson = existing.get("nextLessonId") == draft.next_lesson_id
-                if same_update or (same_text and same_lesson and existing.get("assignedDate") == draft.assigned_date.isoformat()):
+                current_attachments = existing.get("attachments", [])
+                if attachments:
+                    known = {item.get("sha256") for item in current_attachments}
+                    fresh = [item for item in attachments if item.get("sha256") not in known]
+                    if fresh:
+                        if len(current_attachments) + len(fresh) > 6:
+                            raise UserFacingError("К одному заданию можно приложить не больше 6 изображений.")
+                        existing.setdefault("attachments", []).extend(fresh)
+                        existing["updatedAt"] = now
+                        if update_id is not None:
+                            existing["sourceUpdateId"] = update_id
+                        result_holder["status"] = "attached"
+                        result_holder["attachment_added"] = True
+                    else:
+                        result_holder["status"] = "duplicate"
+                        result_holder["attachment_added"] = False
+                else:
                     result_holder["status"] = "duplicate"
-                    result_holder["existing_text"] = existing.get("text")
-                    return
-                existing.update({
-                    "subjectId": draft.subject_id,
-                    "subject": draft.subject,
-                    "text": draft.text,
-                    "assignedDate": draft.assigned_date.isoformat(),
-                    "nextLessonDate": draft.next_lesson_date,
-                    "nextLessonId": draft.next_lesson_id,
-                    "movedByReplacement": draft.moved,
-                    "updatedAt": now,
-                    "sourceUserId": user_id,
-                })
-                if update_id is not None:
-                    existing["sourceUpdateId"] = update_id
-                if draft.moved:
-                    existing.setdefault("originalNextLessonDate", (draft.naive_lesson or {}).get("date", draft.next_lesson_date))
-                if existing.get("status") != "выполнено":
-                    existing["status"] = self._status_for(draft)
-                result_holder["status"] = "updated"
                 result_holder["existing_text"] = existing.get("text")
+                result_holder["siblings"] = self._siblings(tasks, existing)
                 return
             task = {
                 "taskId": draft.task_id,
@@ -1949,15 +2082,30 @@ class HomeworkService:
                 task["originalNextLessonDate"] = (draft.naive_lesson or {}).get("date", draft.next_lesson_date)
             if update_id is not None:
                 task["sourceUpdateId"] = update_id
+            if attachments:
+                task["attachments"] = list(attachments[:6])
+            if any(item.get("taskId") == task["taskId"] for item in tasks):
+                task["taskId"] = stable_hash(task["taskId"] + "|" + now)[:24]
             tasks.append(task)
             result_holder["status"] = "added"
             result_holder["existing_text"] = None
+            result_holder["siblings"] = self._siblings(tasks, task) - 1
 
-        self.storage.publish({"tasks.json": mutate}, f"task-{draft.task_id}", "add or update homework")
+        self.storage.publish({"tasks.json": mutate}, f"task-{draft.task_id}", "add homework")
         return HomeworkResult(
             result_holder.get("status", "duplicate"),
             draft,
             result_holder.get("existing_text"),
+            int(result_holder.get("siblings", 0)),
+            bool(result_holder.get("attachment_added", False)),
+        )
+
+    @staticmethod
+    def _siblings(tasks: list[dict[str, Any]], task: dict[str, Any]) -> int:
+        return sum(
+            1 for item in tasks
+            if item.get("subjectId") == task.get("subjectId")
+            and item.get("nextLessonId") == task.get("nextLessonId")
         )
 
     def recalculate(self, documents: dict[str, dict[str, Any]], today: date | None = None) -> int:
@@ -2013,6 +2161,302 @@ class HomeworkService:
 
 
 # =============================================================================
+# Замены из PDF и VK
+# =============================================================================
+
+PDF_DATE_RE = re.compile(r"(?<!\d)(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?(?!\d)")
+PDF_GROUP_RE = re.compile(r"(?:^|\s)(?:группа\s*)?(\d{3})\s*[МM]\b", re.IGNORECASE)
+PDF_PAIR_RE = re.compile(r"^\s*(\d)\s*(?:пара|урок|ур\.?)\b\s*[:.)—–-]?\s*(.*)$", re.IGNORECASE)
+PDF_PAIR_PLAIN_RE = re.compile(r"^\s*([1-7])\s*[.)]\s+(.+)$")
+PDF_ROOM_RE = re.compile(r"каб(?:инет)?\.?\s*([0-9A-Za-zА-Яа-яЁё/_-]+)|\b(\d[кk]\d{3})\b", re.IGNORECASE)
+PDF_CANCEL_RE = re.compile(r"\bотмен|\bнет\s+пары|\bснят", re.IGNORECASE)
+
+
+class ReplacementImportResult:
+    def __init__(
+        self,
+        status: str,
+        rows: list[dict[str, Any]] | None = None,
+        target_date: date | None = None,
+        week_type: str = "",
+        source: str = "",
+        changed: bool = False,
+        recalculated: int = 0,
+        message: str = "",
+    ):
+        self.status = status
+        self.rows = rows or []
+        self.target_date = target_date
+        self.week_type = week_type
+        self.source = source
+        self.changed = changed
+        self.recalculated = recalculated
+        self.message = message
+
+
+class ReplacementParser:
+    """Разбор текстового слоя PDF замен. Только строки группы 108М."""
+
+    @staticmethod
+    def extract_text(data: bytes) -> str:
+        if PdfReader is None:
+            raise UserFacingError("Для PDF установите pypdf: python -m pip install -r requirements.txt")
+        if not data.startswith(b"%PDF-"):
+            raise UserFacingError("Файл не похож на PDF. Перешлите PDF замен документом.")
+        if len(data) > MAX_PDF_BYTES:
+            raise UserFacingError("PDF слишком большой (максимум 10 МБ).")
+        try:
+            reader = PdfReader(BytesIO(data))
+            pages: list[str] = []
+            for page in reader.pages:
+                pages.append(page.extract_text() or "")
+        except Exception as exc:
+            raise UserFacingError("Не удалось прочитать PDF. Возможно, это скан без текстового слоя.") from exc
+        text = "\n".join(pages).strip()
+        if not text:
+            raise UserFacingError(
+                "В PDF нет текстового слоя: это скан. Сделайте скриншот/текстовый PDF или пришлите замены текстом."
+            )
+        return text
+
+    @staticmethod
+    def extract_date(text: str, fallback: date | None = None) -> date | None:
+        lines = [line for line in str(text).splitlines() if line.strip()]
+        ordered = [line for line in lines if "замен" in normalize_text(line)] + lines
+        for line in ordered:
+            for match in PDF_DATE_RE.finditer(line):
+                day_value, month_value, year_value = match.groups()
+                base_year = (fallback or today_moscow()).year
+                year = int(year_value) if year_value else base_year
+                if year < 100:
+                    year += 2000
+                try:
+                    parsed = date(year, int(month_value), int(day_value))
+                except ValueError:
+                    continue
+                if not year_value and parsed < (fallback or today_moscow()) - timedelta(days=180):
+                    try:
+                        parsed = parsed.replace(year=year + 1)
+                    except ValueError:
+                        continue
+                return parsed
+        return fallback
+
+    @staticmethod
+    def extract_week_type(text: str) -> str:
+        lowered = normalize_text(text)
+        if "знаменатель" in lowered:
+            return "denominator"
+        if "числитель" in lowered:
+            return "numerator"
+        return ""
+
+    @staticmethod
+    def _subject_id(subject: str, schedule_doc: dict[str, Any]) -> tuple[str, str]:
+        catalog = ScheduleService.subject_catalog(schedule_doc)
+        cleaned = normalize_text(subject)
+        if not cleaned:
+            return "cancelled", "Отмена"
+        best: tuple[float, str] | None = None
+        for subject_id, item in catalog.items():
+            key = normalize_text(item.get("key", ""))
+            name = normalize_text(item.get("subject", ""))
+            score = max(
+                difflib.SequenceMatcher(None, cleaned, key).ratio(),
+                difflib.SequenceMatcher(None, cleaned, name).ratio(),
+            )
+            if cleaned == key or cleaned == name:
+                return subject_id, item.get("subject", subject)
+            if best is None or score > best[0]:
+                best = (score, subject_id)
+        if best and best[0] >= 0.78:
+            return best[1], catalog[best[1]].get("subject", subject)
+        return "other-" + stable_hash(cleaned)[:10], subject
+
+    @classmethod
+    def parse(
+        cls,
+        text: str,
+        schedule_doc: dict[str, Any],
+        source: str,
+        source_hash: str,
+        source_url: str = "",
+        fallback_date: date | None = None,
+    ) -> ReplacementImportResult:
+        target = cls.extract_date(text, fallback_date)
+        if target is None:
+            raise UserFacingError("В PDF не нашёл дату замен. Добавьте строку «Замены на ДД.ММ.ГГГГ».")
+        week_type = cls.extract_week_type(text) or ScheduleService.week_type(target, schedule_doc, None)
+        current_group = ""
+        rows_by_pair: dict[int, dict[str, Any]] = {}
+        for raw_line in str(text).splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            group_matches = list(PDF_GROUP_RE.finditer(line))
+            if group_matches:
+                matched = group_matches[0]
+                current_group = f"{matched.group(1)}М"
+                line = (line[:matched.start()] + " " + line[matched.end():]).strip(" .,:;-—–")
+                if not line:
+                    continue
+            if current_group != GROUP_NAME:
+                continue
+            pair_match = PDF_PAIR_RE.match(line) or PDF_PAIR_PLAIN_RE.match(line)
+            if not pair_match:
+                continue
+            pair_number = int(pair_match.group(1))
+            body = pair_match.group(2).strip(" .,:;—–-")
+            if not body:
+                continue
+            cancelled = bool(PDF_CANCEL_RE.search(body))
+            room_match = PDF_ROOM_RE.search(body)
+            room = ""
+            if room_match:
+                room = (room_match.group(1) or room_match.group(2) or "").strip(" .,;")
+            without_room = PDF_ROOM_RE.sub(" ", body)
+            subject_part = re.split(r"\s+[—–-]\s+|\s{2,}", without_room)[0]
+            subject = re.sub(r"\([^)]*\)", " ", subject_part)
+            subject = SPACE_RE.sub(" ", subject).strip(" .,:;—–-")
+            if cancelled and not subject:
+                subject = "Отмена"
+            if not subject:
+                continue
+            subject_id, canonical = cls._subject_id(subject, schedule_doc)
+            replacement_id = "rep-" + stable_hash(f"{target.isoformat()}|{pair_number}|{GROUP_NAME}")[:20]
+            row = {
+                "replacementId": replacement_id,
+                "date": target.isoformat(),
+                "weekType": week_type,
+                "pairNumber": pair_number,
+                "newSubjectId": subject_id,
+                "newSubject": canonical if not cancelled else (subject or "Отмена"),
+                "newRoom": room,
+                "cancelled": cancelled,
+                "source": source,
+                "sourceHash": source_hash,
+                "receivedAt": iso_now(),
+                "group": GROUP_NAME,
+            }
+            if cancelled:
+                row["newSubject"] = subject
+            if source_url:
+                row["sourceUrl"] = source_url
+            rows_by_pair[pair_number] = row
+        rows = [rows_by_pair[pair] for pair in sorted(rows_by_pair)]
+        if not rows:
+            return ReplacementImportResult("no-108m", target_date=target, week_type=week_type, source=source)
+        return ReplacementImportResult(
+            "parsed",
+            rows=rows,
+            target_date=target,
+            week_type=week_type,
+            source=source,
+        )
+
+
+class VKClient:
+    """Поиск вечернего поста замен в открытой группе VK."""
+
+    def __init__(
+        self,
+        config: Config,
+        http: Callable[[str, str, dict[str, str], bytes | None, int], tuple[int, dict[str, str], bytes]] | None = None,
+    ):
+        self.config = config
+        self.http = http or _request_with_urllib
+
+    def _api(self, method: str, params: dict[str, str]) -> dict[str, Any]:
+        query = dict(params)
+        query["access_token"] = self.config.vk_access_token or ""
+        query["v"] = VK_API_VERSION
+        url = f"https://api.vk.com/method/{method}?" + urlencode(query)
+        status, _, payload = self.http("GET", url, {"User-Agent": "108m-backend/1.0"}, None, 30)
+        if status != 200:
+            raise ExternalServiceError(f"VK недоступен (HTTP {status}).")
+        try:
+            data = json.loads(payload.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise ExternalServiceError("VK вернул некорректный ответ.") from exc
+        if not isinstance(data, dict) or "response" not in data:
+            raise ExternalServiceError("VK вернул ошибку. Проверьте VK_GROUP_ID и VK_ACCESS_TOKEN.")
+        return data["response"]
+
+    def find_post(self, target: date) -> tuple[str, str] | None:
+        response = self._api("wall.get", {
+            "owner_id": f"-{self.config.vk_group_id}",
+            "count": "30",
+        })
+        items = response.get("items", []) if isinstance(response, dict) else []
+        best: tuple[int, int, str, str] | None = None
+        for post in items:
+            if not isinstance(post, dict):
+                continue
+            text = str(post.get("text", ""))
+            title_date = ReplacementParser.extract_date(text)
+            dates = [title_date] if title_date else []
+            for match in PDF_DATE_RE.finditer(text):
+                day_value, month_value, year_value = match.groups()
+                try:
+                    parsed = date(int(year_value) + (2000 if year_value and int(year_value) < 100 else 0) if year_value else target.year, int(month_value), int(day_value))
+                except ValueError:
+                    continue
+                if parsed not in dates:
+                    dates.append(parsed)
+            if dates and target not in dates:
+                continue
+            lowered = normalize_text(text)
+            score = 0
+            if "замен" in lowered:
+                score += 3
+            if target in dates:
+                score += 5
+            pdf_url = ""
+            pdf_title = ""
+            for attachment in post.get("attachments", []) if isinstance(post.get("attachments"), list) else []:
+                doc = attachment.get("doc") if isinstance(attachment, dict) else None
+                if not isinstance(doc, dict):
+                    continue
+                extension = str(doc.get("ext", "")).lower()
+                url = str(doc.get("url", ""))
+                if extension == "pdf" and url.startswith("https://"):
+                    pdf_url = url
+                    pdf_title = str(doc.get("title", "zameni.pdf"))
+                    break
+            if not pdf_url:
+                continue
+            score += 4
+            if not dates and "замен" not in lowered:
+                continue
+            timestamp = int(post.get("date", 0) or 0)
+            candidate = (score, timestamp, pdf_url, pdf_title)
+            if best is None or candidate[:2] > best[:2]:
+                best = candidate
+        if best is None or best[0] < 5:
+            return None
+        return best[2], best[3]
+
+    def download_pdf(self, url: str) -> bytes:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        if parsed.scheme != "https" or not any(
+            host == suffix or host.endswith("." + suffix) for suffix in VK_ALLOWED_HOST_SUFFIXES
+        ):
+            raise ExternalServiceError("VK вернул недопустимый адрес PDF.")
+        status, headers, payload = self.http("GET", url, {"User-Agent": "108m-backend/1.0"}, None, 60)
+        if status != 200:
+            raise ExternalServiceError(f"Не удалось скачать PDF из VK (HTTP {status}).")
+        if len(payload) > MAX_PDF_BYTES:
+            raise UserFacingError("PDF замен слишком большой (максимум 10 МБ).")
+        if not payload.startswith(b"%PDF-"):
+            raise UserFacingError("Вложение VK не является PDF.")
+        content_type = str(headers.get("Content-Type", headers.get("content-type", ""))).lower()
+        if content_type and "pdf" not in content_type and "octet-stream" not in content_type:
+            raise UserFacingError("VK вернул файл с неожиданным MIME-типом.")
+        return payload
+
+
+# =============================================================================
 # Дежурства
 # =============================================================================
 
@@ -2024,6 +2468,10 @@ DUTY_COMMON_WORDS = {
     "сегодня", "дежурили", "дежурил", "дежурила", "дежурные", "дежурство",
     "человек", "человека", "ученик", "ученика", "учеников", "смена", "пара", "и",
 }
+HOMEWORK_CAPTION_RE = re.compile(
+    r"^\s*(?:дз|д/з|домашк[аи]|домашнее\s+задание|hw)\b[:\s—–-]*",
+    re.IGNORECASE,
+)
 
 
 class DutyParseResult:
@@ -2035,11 +2483,21 @@ class DutyParseResult:
 
 
 class DutyReportResult:
-    def __init__(self, status: str, names: list[str], ambiguous: list[str], day_status: str):
+    def __init__(
+        self,
+        status: str,
+        names: list[str],
+        ambiguous: list[str],
+        day_status: str,
+        all_names: list[str] | None = None,
+        added_names: list[str] | None = None,
+    ):
         self.status = status
         self.names = names
         self.ambiguous = ambiguous
         self.day_status = day_status
+        self.all_names = all_names if all_names is not None else names
+        self.added_names = added_names if added_names is not None else names
 
 
 class DutyCloseResult:
@@ -2074,6 +2532,23 @@ class DutyService:
             record["name"] = student.get("name", record.get("name", ""))
             record["count"] = int(record.get("count", 0) or 0)
 
+    @staticmethod
+    def _preference_pairs(duties_doc: dict[str, Any]) -> list[tuple[str, str]]:
+        pairs: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for raw in duties_doc.get("pairPreferences", []) or []:
+            if not isinstance(raw, (list, tuple)) or len(raw) != 2:
+                continue
+            left, right = str(raw[0]), str(raw[1])
+            if left == right:
+                continue
+            key = tuple(sorted((left, right)))
+            if key in seen:
+                continue
+            seen.add(key)
+            pairs.append((left, right))
+        return sorted(pairs)
+
     @classmethod
     def select_for(
         cls,
@@ -2092,9 +2567,32 @@ class DutyService:
         layer = sorted(student_id for student_id, count in counts.items() if count == minimum)
         seed = cls.seed_for(day, students_doc)
         rng = random.Random(int(seed[:16], 16))
+
+        # Пары пожеланий учитываются только среди учеников с минимальным числом дежурств.
+        preferred_pairs = [
+            pair for pair in cls._preference_pairs(duties_doc)
+            if pair[0] in layer and pair[1] in layer
+        ]
+        if preferred_pairs:
+            chosen = rng.choice(preferred_pairs)
+            return [chosen[0], chosen[1]]
+
         if len(layer) >= 2:
             return rng.sample(layer, 2)
         selected = layer[:1]
+        first = selected[0]
+        partners = sorted({
+            right if left == first else left
+            for left, right in cls._preference_pairs(duties_doc)
+            if first in (left, right)
+        } - set(selected))
+        if partners:
+            best_count = min(counts[student_id] for student_id in partners)
+            # Небольшой перевес в пользу пожелания: партнёр может быть на один дежурный слой выше.
+            if best_count <= minimum + 1:
+                best_layer = [student_id for student_id in partners if counts[student_id] == best_count]
+                selected.append(rng.choice(best_layer))
+                return selected
         next_counts = sorted({count for count in counts.values() if count > minimum})
         if next_counts:
             second_layer = sorted(
@@ -2107,6 +2605,86 @@ class DutyService:
             raise UserFacingError("Не удалось выбрать второго дежурного: список учеников слишком мал.")
         selected.append(rng.choice(second_layer))
         return selected
+
+    @classmethod
+    def resolve_pair(
+        cls,
+        tokens: list[str],
+        students_doc: dict[str, Any],
+    ) -> tuple[str, str]:
+        """Разобрать пару пожеланий из фамилий/имён. Нужно ровно два разных ученика."""
+        cleaned: list[str] = []
+        for token in tokens:
+            for part in re.split(r"[,;+/]|\s+и\s+|\s+", str(token or "")):
+                part = part.strip(" .,:;—-")
+                if part:
+                    cleaned.append(part)
+        if len(cleaned) != 2:
+            raise UserFacingError("Укажи ровно две фамилии: /pair Абакаев Бадреев")
+        resolved: list[str] = []
+        unresolved: list[str] = []
+        for token in cleaned:
+            query = normalize_text(token)
+            if len(query) < 3:
+                unresolved.append(token)
+                continue
+            student, ambiguous = cls._resolve_name_token(query, students_doc)
+            if ambiguous or student is None:
+                unresolved.append(token)
+                continue
+            student_id = str(student["studentId"])
+            if student_id not in resolved:
+                resolved.append(student_id)
+        if unresolved:
+            raise UserFacingError(
+                "Не смог однозначно найти: " + ", ".join(unresolved)
+                + ". Напиши фамилию точнее."
+            )
+        if len(resolved) != 2:
+            raise UserFacingError("Нужны два разных ученика. Проверь фамилии.")
+        return resolved[0], resolved[1]
+
+    def update_pair(
+        self,
+        tokens: list[str],
+        students_doc: dict[str, Any],
+        documents: dict[str, dict[str, Any]],
+        remove: bool = False,
+    ) -> tuple[list[str], bool]:
+        left, right = self.resolve_pair(tokens, students_doc)
+        names = {
+            str(student["studentId"]): str(student.get("name", student["studentId"]))
+            for student in students_doc.get("students", [])
+        }
+        key = tuple(sorted((left, right)))
+        changed = False
+
+        def mutate(duties_doc: dict[str, Any]) -> None:
+            nonlocal changed
+            current = [
+                tuple(sorted((str(pair[0]), str(pair[1]))))
+                for pair in duties_doc.get("pairPreferences", []) or []
+                if isinstance(pair, (list, tuple)) and len(pair) == 2
+            ]
+            if remove:
+                if key in current:
+                    duties_doc["pairPreferences"] = [
+                        pair for pair in duties_doc.get("pairPreferences", [])
+                        if tuple(sorted((str(pair[0]), str(pair[1])))) != key
+                    ]
+                    changed = True
+                return
+            if key not in current:
+                duties_doc.setdefault("pairPreferences", []).append([left, right])
+                duties_doc["pairPreferences"].sort(key=lambda pair: tuple(sorted((str(pair[0]), str(pair[1])))))
+                changed = True
+
+        self.storage.publish(
+            {"duties.json": mutate},
+            f"duty-pair-{'remove' if remove else 'add'}-{short_hash('|'.join(key), 16)}",
+            "update duty pair preference",
+        )
+        return [names.get(left, left), names.get(right, right)], changed
 
     @classmethod
     def _ensure_day_in_doc(
@@ -2253,7 +2831,15 @@ class DutyService:
                 result_holder["names"] = list(existing.get("studentNames", []))
                 result_holder["ambiguous"] = list(existing.get("ambiguous", []))
                 result_holder["day_status"] = day_entry.get("status")
+                result_holder["all_names"] = self._confirmed_names(day_entry)
+                result_holder["added_names"] = []
                 return
+            known_ids = {
+                student_id
+                for report in reports
+                if report.get("status") == "confirmed"
+                for student_id in report.get("studentIds", [])
+            }
             reports.append({
                 "reportId": report_id,
                 "userId": user_id,
@@ -2264,11 +2850,18 @@ class DutyService:
                 "ambiguous": parsed.ambiguous,
                 "messageHash": stable_hash(normalize_text(text)),
             })
-            day_entry["status"] = "reported" if status == "confirmed" else "pending"
+            day_entry["status"] = "reported" if any(
+                report.get("status") == "confirmed" for report in reports
+            ) else "pending"
             result_holder["status"] = status
             result_holder["names"] = parsed.names
             result_holder["ambiguous"] = parsed.ambiguous
             result_holder["day_status"] = day_entry["status"]
+            result_holder["all_names"] = self._confirmed_names(day_entry)
+            result_holder["added_names"] = [
+                name for student_id, name in zip(parsed.student_ids, parsed.names)
+                if student_id not in known_ids
+            ]
 
         self.storage.publish({"duties.json": mutate}, f"duty-report-{report_id}", "duty report")
         return DutyReportResult(
@@ -2276,7 +2869,20 @@ class DutyService:
             result_holder.get("names", parsed.names),
             result_holder.get("ambiguous", parsed.ambiguous),
             result_holder.get("day_status", "pending"),
+            result_holder.get("all_names", parsed.names),
+            result_holder.get("added_names", parsed.names),
         )
+
+    @staticmethod
+    def _confirmed_names(day_entry: dict[str, Any]) -> list[str]:
+        names: list[str] = []
+        for report in day_entry.get("reports", []):
+            if report.get("status") != "confirmed":
+                continue
+            for name in report.get("studentNames", []):
+                if name not in names:
+                    names.append(name)
+        return names
 
     @classmethod
     def _close_day_in_doc(
@@ -2297,15 +2903,19 @@ class DutyService:
             ]
             return DutyCloseResult("already-closed", actual_names, already_closed=True)
         confirmed = [report for report in day_entry.get("reports", []) if report.get("status") == "confirmed"]
-        report = confirmed[-1] if confirmed else None
         day_entry["closed"] = True
         day_entry["closedAt"] = iso_now()
-        if report is None:
+        if not confirmed:
             day_entry["actual"] = []
             day_entry["actualNames"] = []
             day_entry["status"] = "closed-without-confirmation"
             return DutyCloseResult("closed-without-confirmation", [])
-        actual = list(dict.fromkeys(report.get("studentIds", [])))
+        # Несколько отчётов объединяются: «Дежурили …» дважды означает всех упомянутых.
+        actual: list[str] = []
+        for report in confirmed:
+            for student_id in report.get("studentIds", []):
+                if student_id not in actual:
+                    actual.append(student_id)
         actual_names = [
             duties_doc.get("students", {}).get(student_id, {}).get("name")
             or next((student.get("name", "") for student in students_doc.get("students", []) if student.get("studentId") == student_id), student_id)
@@ -2342,6 +2952,26 @@ class DutyService:
         if day_entry.get("status") == "pending":
             return "ожидает проверки"
         return "выбран"
+
+    @classmethod
+    def describe_pair_preferences(cls, documents: dict[str, dict[str, Any]]) -> str:
+        names = {
+            str(student["studentId"]): str(student.get("name", student["studentId"]))
+            for student in documents["students.json"].get("students", [])
+        }
+        pairs = cls._preference_pairs(documents["duties.json"])
+        if not pairs:
+            return (
+                "Пожелания по парам дежурных не заданы.\n"
+                "Добавить: /pair Абакаев Бадреев\n"
+                "Удалить: /unpair Абакаев Бадреев"
+            )
+        lines = ["Пожелания по парам дежурных:"]
+        for left, right in pairs:
+            lines.append(f"— {names.get(left, left)} + {names.get(right, right)}")
+        lines.append("")
+        lines.append("Бот выберет такую пару, если оба ученика входят в минимальный слой дежурств.")
+        return "\n".join(lines)
 
     @classmethod
     def describe_recent(cls, documents: dict[str, dict[str, Any]], limit: int = 7) -> str:
@@ -2381,8 +3011,10 @@ class BotScheduler:
         self.backend = current
         self.task: asyncio.Task | None = None
         self.catch_up_done = False
+        self.bot: Any = None
 
     async def start(self, app: Any = None) -> None:
+        self.bot = getattr(app, "bot", None) if app is not None else None
         self.task = asyncio.create_task(self.loop(), name="108m-scheduler")
 
     async def stop(self, app: Any = None) -> None:
@@ -2412,6 +3044,42 @@ class BotScheduler:
             if not self.backend.local.get(marker):
                 await self.run_maintenance(today)
                 self.backend.local.set(marker, iso_now())
+        if now.hour == 20:
+            marker = f"vkImportDone:{today.isoformat()}"
+            if not self.backend.local.get(marker):
+                self.backend.local.set(marker, iso_now())
+                await self.run_vk_import(today)
+
+    async def run_vk_import(self, today: date) -> None:
+        target = today + timedelta(days=1)
+        while target.isoweekday() > 5:
+            target += timedelta(days=1)
+        try:
+            result = await asyncio.to_thread(self.backend.import_replacements_from_vk, target)
+        except UserFacingError as exc:
+            await self._notify_all(f"Замены из VK не загружены: {exc}\nПерешлите PDF замен в бота вручную.")
+            return
+        except (ExternalServiceError, StorageBusyError, StorageError) as exc:
+            LOG.warning("vk import failed: %s", safe_exception(exc, self.backend.secrets))
+            await self._notify_all("Не удалось получить замены из VK. Перешлите PDF замен в бота вручную.")
+            return
+        except Exception as exc:
+            LOG.error("vk import crashed: %s", safe_exception(exc, self.backend.secrets))
+            await self._notify_all("Не удалось получить замены из VK. Перешлите PDF замен в бота вручную.")
+            return
+        if result.status in ("vk-disabled", "vk-not-found", "no-108m"):
+            await self._notify_all(result.message)
+        elif result.changed:
+            await self._notify_all(result.message)
+
+    async def _notify_all(self, text: str) -> None:
+        if self.bot is None:
+            return
+        for user_id in sorted(self.backend.config.allowed_telegram_ids):
+            try:
+                await self.bot.send_message(user_id, text, disable_web_page_preview=True)
+            except Exception as exc:
+                LOG.warning("notification failed user=%s: %s", user_id, safe_exception(exc, self.backend.secrets))
 
     async def run_maintenance(self, today: date) -> None:
         documents, _ = await self.backend.read_documents()
@@ -2455,6 +3123,570 @@ class BotScheduler:
 
 
 # =============================================================================
+# Gemini и слияние оценок
+# =============================================================================
+
+GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+ALLOWED_IMAGE_MIME = {"image/jpeg", "image/png", "image/webp"}
+
+
+@dataclass(frozen=True)
+class PhotoInput:
+    data: bytes
+    mime_type: str
+    file_name: str
+    sha256: str
+
+
+@dataclass
+class GeminiResult:
+    response: dict[str, Any]
+    model: str
+    rotation: int
+
+
+@dataclass
+class MergeStats:
+    added: int = 0
+    same: int = 0
+    low: int = 0
+    conflicts: int = 0
+    unresolved: int = 0
+    changed: bool = False
+
+
+@dataclass
+class RecognisedPage:
+    photo: PhotoInput
+    result: GeminiResult
+
+
+class GeminiClient:
+    def __init__(
+        self,
+        config: Config,
+        quota: Quota,
+        http: Callable[[str, str, dict[str, str], bytes | None, int], tuple[int, dict[str, str], bytes]] | None = None,
+        sleeper: Callable[[float], None] = time.sleep,
+    ):
+        self.config = config
+        self.quota = quota
+        self.http = http or _request_with_urllib
+        self.sleeper = sleeper
+
+    @staticmethod
+    def _prompt(students_doc: dict[str, Any], schedule_doc: dict[str, Any]) -> str:
+        students = [
+            {
+                "studentId": student.get("studentId"),
+                "name": student.get("name"),
+                "aliases": student.get("aliases", []),
+                "englishGroup": student.get("englishGroup"),
+            }
+            for student in students_doc.get("students", [])
+        ]
+        subjects = [
+            {"subjectId": item["subjectId"], "subject": item["subject"]}
+            for item in ScheduleService.subject_catalog(schedule_doc).values()
+        ]
+        students_json = json.dumps(students, ensure_ascii=False, separators=(",", ":"))
+        subjects_json = json.dumps(subjects, ensure_ascii=False, separators=(",", ":"))
+        return (
+            "Ты распознаёшь фотографию страницы журнала группы 108М колледжа КГАМТ.\n"
+            "Верни ТОЛЬКО JSON без Markdown и без пояснений.\n"
+            f"Версия схемы: {PROMPT_VERSION}.\n"
+            f"Ученики с постоянными ID: {students_json}\n"
+            f"Предметы: {subjects_json}\n"
+            "Правила:\n"
+            "1. Допустимые значения оценки: 2, 3, 4, 5, н/б. Точка, пустая клетка и маркер А не являются оценкой.\n"
+            "2. Не додумывай отсутствующие клетки и даты. Если клетка не видна или не читается — не добавляй её; опиши в warnings.\n"
+            "3. Рукописную Н нельзя превращать в 4. Если символ похож на Н и 4 одновременно — укажи value 4, raw Н, confidence не выше 0.5 и объясни в reason.\n"
+            "4. entryType: daily — обычная отметка, attendance — посещаемость (например, н/б), attestation — итог аттестации.\n"
+            "5. studentId бери только из списка. Если не уверен — оставь пустым, а studentHint заполни видимым текстом.\n"
+            "6. date — только YYYY-MM-DD, если дата действительно видна. Не выдумывай дату.\n"
+            "7. confidence — число от 0 до 1. alternatives — другие возможные значения.\n"
+            "8. document.group всегда 108М; document.subject — название предмета; document.orientation — 0, 90, 180 или 270.\n"
+            "Схема ответа:\n"
+            '{"document":{"group":"108М","subject":"","subjectId":"","orientation":0},'
+            '"cells":[{"studentHint":"","studentId":"","date":"YYYY-MM-DD","raw":"","value":"5",'
+            '"entryType":"daily","confidence":0.95,"alternatives":[],"reason":""}],"warnings":[]}'
+        )
+
+    @staticmethod
+    def _image_bytes(photo: PhotoInput, rotation: int = 0) -> bytes:
+        if Image is None:
+            raise UserFacingError("Для фотографий установите Pillow: python -m pip install -r requirements.txt")
+        if len(photo.data) > MAX_IMAGE_BYTES:
+            raise UserFacingError("Изображение слишком большое (максимум 12 МБ).")
+        if photo.mime_type and photo.mime_type not in ALLOWED_IMAGE_MIME:
+            raise UserFacingError("Поддерживаются только JPEG, PNG и WebP.")
+        try:
+            image = Image.open(BytesIO(photo.data))
+            image.load()
+            image = ImageOps.exif_transpose(image).convert("RGB")
+            image.thumbnail((2400, 2400), Image.Resampling.LANCZOS)
+            if rotation:
+                image = image.rotate(rotation, expand=True)
+            output = BytesIO()
+            image.save(output, format="JPEG", quality=88, optimize=True)
+        except Exception as exc:
+            raise UserFacingError("Не удалось открыть изображение. Отправьте JPEG, PNG или WebP.") from exc
+        result = output.getvalue()
+        if len(result) > MAX_IMAGE_BYTES:
+            raise UserFacingError("Изображение слишком большое после сжатия.")
+        return result
+
+    @staticmethod
+    def homework_image(photo: PhotoInput) -> tuple[bytes, str, str, int, int]:
+        """Сжать вложение ДЗ, убрать EXIF и вернуть (bytes, mime, extension, width, height)."""
+        if Image is None:
+            raise UserFacingError("Для изображений установите Pillow: python -m pip install -r requirements.txt")
+        if len(photo.data) > MAX_IMAGE_BYTES:
+            raise UserFacingError("Изображение слишком большое (максимум 12 МБ).")
+        if photo.mime_type and photo.mime_type not in ALLOWED_IMAGE_MIME:
+            raise UserFacingError("Поддерживаются только JPEG, PNG и WebP.")
+        try:
+            image = Image.open(BytesIO(photo.data))
+            image.load()
+            image = ImageOps.exif_transpose(image).convert("RGB")
+            image.thumbnail((MAX_HOMEWORK_IMAGE_SIDE, MAX_HOMEWORK_IMAGE_SIDE), Image.Resampling.LANCZOS)
+            width, height = image.size
+            output = BytesIO()
+            try:
+                image.save(output, format="WEBP", quality=82, method=4)
+                mime, ext = "image/webp", "webp"
+            except Exception:
+                output = BytesIO()
+                image.save(output, format="JPEG", quality=82, optimize=True)
+                mime, ext = "image/jpeg", "jpg"
+        except UserFacingError:
+            raise
+        except Exception as exc:
+            raise UserFacingError("Не удалось открыть изображение. Отправьте JPEG, PNG или WebP.") from exc
+        result = output.getvalue()
+        if len(result) > MAX_ATTACHMENT_BYTES:
+            raise UserFacingError("Вложение слишком большое после сжатия.")
+        return result, mime, ext, width, height
+
+    @staticmethod
+    def extract_json(text: str) -> dict[str, Any]:
+        value = str(text or "").strip()
+        fence = re.search(r"```(?:json)?\s*(.*?)```", value, flags=re.IGNORECASE | re.DOTALL)
+        if fence:
+            value = fence.group(1).strip()
+        start = value.find("{")
+        if start < 0:
+            raise ValueError("Gemini не вернул JSON")
+        try:
+            parsed, _ = json.JSONDecoder().raw_decode(value[start:])
+        except json.JSONDecodeError as exc:
+            raise ValueError("Gemini вернул некорректный JSON") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("Gemini вернул не объект")
+        return parsed
+
+    @staticmethod
+    def validate_response(value: Any) -> dict[str, Any]:
+        try:
+            root = _object(value, "gemini", {"document", "cells", "warnings"}, {"document", "cells", "warnings", "metadata"})
+            document = _object(
+                root["document"],
+                "gemini.document",
+                {"group", "subject", "orientation"},
+                {"group", "subject", "subjectId", "orientation"},
+            )
+            group = normalize_text(document["group"]).upper().replace("M", "М")
+            if group not in {"108М"}:
+                raise SchemaError("gemini.document.group: ожидалась группа 108М")
+            subject = _string(document["subject"], "gemini.document.subject", allow_empty=True)
+            if "subjectId" in document:
+                _string(document["subjectId"], "gemini.document.subjectId", allow_empty=True)
+            orientation = _integer(document["orientation"], "gemini.document.orientation")
+            if orientation not in (0, 90, 180, 270):
+                raise SchemaError("gemini.document.orientation: допустимо 0, 90, 180, 270")
+            cells = _list(root["cells"], "gemini.cells", 0, 5000)
+            for index, item in enumerate(cells):
+                where = f"gemini.cells[{index}]"
+                cell = _object(
+                    item,
+                    where,
+                    {"studentHint", "studentId", "date", "raw", "value", "entryType", "confidence", "alternatives", "reason"},
+                    {"studentHint", "studentId", "date", "raw", "value", "entryType", "confidence", "alternatives", "reason"},
+                )
+                _string(cell["studentHint"], f"{where}.studentHint", allow_empty=True)
+                _string(cell["studentId"], f"{where}.studentId", allow_empty=True)
+                _iso_date(cell["date"], f"{where}.date")
+                _string(cell["raw"], f"{where}.raw", allow_empty=True)
+                _enum(cell["value"], f"{where}.value", VALID_GRADE_VALUES)
+                _enum(cell["entryType"], f"{where}.entryType", ENTRY_TYPES)
+                _number(cell["confidence"], f"{where}.confidence", 0, 1)
+                alternatives = _list(cell["alternatives"], f"{where}.alternatives", 0, 10)
+                for alt_index, alternative in enumerate(alternatives):
+                    _enum(alternative, f"{where}.alternatives[{alt_index}]", VALID_GRADE_VALUES)
+                _string(cell["reason"], f"{where}.reason", allow_empty=True)
+            warnings = _list(root["warnings"], "gemini.warnings", 0, 200)
+            for index, warning in enumerate(warnings):
+                _string(warning, f"gemini.warnings[{index}]", allow_empty=True)
+            if "metadata" in root:
+                _object(root["metadata"], "gemini.metadata", set(), None)
+        except SchemaError as exc:
+            raise ValueError(str(exc)) from exc
+        normalized = clone_json(value)
+        normalized["document"]["group"] = "108М"
+        normalized["document"]["subject"] = subject
+        return normalized
+
+    def _call_model(self, model: str, image_bytes: bytes, prompt: str) -> dict[str, Any]:
+        body = {
+            "contents": [{
+                "parts": [
+                    {"text": prompt},
+                    {"inline_data": {"mime_type": "image/jpeg", "data": base64.b64encode(image_bytes).decode("ascii")}},
+                ],
+            }],
+            "generationConfig": {
+                "temperature": 0.1,
+                "maxOutputTokens": 8192,
+                "responseMimeType": "application/json",
+            },
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": self.config.gemini_api_key,
+            "User-Agent": "108m-backend/1.0",
+        }
+        url = f"{GEMINI_API_BASE}/{quote(model, safe='')}:generateContent"
+        estimated = min(50_000, 4_000 + len(image_bytes) // 1024 * 60)
+        last_error: Exception | None = None
+        for attempt in range(3):
+            self.quota.reserve(estimated)
+            try:
+                status, response_headers, payload = self.http("POST", url, headers, json.dumps(body).encode(), 90)
+            except ExternalServiceError:
+                raise
+            if status == 200:
+                try:
+                    parsed = json.loads(payload.decode("utf-8"))
+                    candidates = parsed.get("candidates", [])
+                    parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
+                    text = "".join(str(part.get("text", "")) for part in parts)
+                except (ValueError, UnicodeDecodeError, KeyError, IndexError, TypeError) as exc:
+                    raise ValueError("Gemini вернул неожиданный ответ") from exc
+                return self.extract_json(text)
+            if status in (429, 503):
+                last_error = ExternalServiceError(f"Gemini HTTP {status}")
+                if attempt == 2:
+                    break
+                delay = 5.0
+                retry_after = response_headers.get("Retry-After") or response_headers.get("retry-after")
+                if retry_after:
+                    try:
+                        delay = float(retry_after)
+                    except ValueError:
+                        try:
+                            delay = max(1.0, (parsedate_to_datetime(retry_after) - datetime.now(UTC)).total_seconds())
+                        except (TypeError, ValueError):
+                            delay = 5.0
+                self.sleeper(max(1.0, min(30.0, delay)))
+                continue
+            if status in (400, 404, 422):
+                raise UserFacingError("Модель Gemini недоступна. Бот попробует следующую модель.")
+            if status in (401, 403):
+                raise UserFacingError("Gemini отклонил API-ключ. Проверьте GEMINI_API_KEY.")
+            raise ExternalServiceError(f"Gemini вернул HTTP {status}.")
+        raise ExternalServiceError(str(last_error or "Gemini недоступен"))
+
+    def recognise(
+        self,
+        photo: PhotoInput,
+        students_doc: dict[str, Any],
+        schedule_doc: dict[str, Any],
+        rotation: int = 0,
+    ) -> GeminiResult:
+        image_bytes = self._image_bytes(photo, rotation)
+        prompt = self._prompt(students_doc, schedule_doc)
+        last_error: Exception | None = None
+        for model in self.config.gemini_models:
+            try:
+                response = self._call_model(model, image_bytes, prompt)
+                validated = self.validate_response(response)
+                return GeminiResult(validated, model, rotation)
+            except UserFacingError as exc:
+                message = str(exc)
+                if "API-ключ" in message:
+                    raise
+                last_error = exc
+                continue
+            except (ValueError, ExternalServiceError) as exc:
+                last_error = exc
+                continue
+        if isinstance(last_error, UserFacingError):
+            raise last_error
+        raise UserFacingError("Gemini не смог распознать страницу. Проверьте фото и повторите позже.")
+
+    def recognise_with_fallback(
+        self,
+        photo: PhotoInput,
+        students_doc: dict[str, Any],
+        schedule_doc: dict[str, Any],
+    ) -> GeminiResult:
+        attempts = [0, 90, 270]
+        best: GeminiResult | None = None
+        last_error: Exception | None = None
+        for rotation in attempts:
+            try:
+                result = self.recognise(photo, students_doc, schedule_doc, rotation)
+            except QuotaExceeded:
+                raise
+            except UserFacingError as exc:
+                last_error = exc
+                continue
+            cells = result.response.get("cells", [])
+            if cells:
+                confidences = [float(cell.get("confidence", 0) or 0) for cell in cells]
+                average = sum(confidences) / len(confidences)
+                if best is None or len(cells) > len(best.response.get("cells", [])) or average > 0.6:
+                    best = result
+                if average >= 0.55:
+                    return result
+            elif best is None:
+                best = result
+        if best is not None:
+            return best
+        if last_error is not None:
+            raise last_error
+        raise UserFacingError("Gemini не смог распознать страницу.")
+
+
+class GradeService:
+    @staticmethod
+    def _subject(document: dict[str, Any], schedule_doc: dict[str, Any]) -> tuple[str, str]:
+        catalog, aliases = HomeworkService._catalog_with_aliases(schedule_doc)
+        subject_id = str(document.get("subjectId", "") or "")
+        if subject_id in catalog:
+            return subject_id, catalog[subject_id]["subject"]
+        key = normalize_text(document.get("subject", ""))
+        if key in aliases:
+            resolved = aliases[key]
+            return resolved, catalog[resolved]["subject"]
+        if key:
+            for catalog_id, item in catalog.items():
+                if difflib.SequenceMatcher(None, key, item["key"]).ratio() >= 0.85:
+                    return catalog_id, item["subject"]
+        raise UserFacingError(
+            f"Предмет «{document.get('subject', '')}» не найден в расписании. Оценки этой страницы не сохранены."
+        )
+
+    @staticmethod
+    def _student(student_id: Any, hint: Any, students_doc: dict[str, Any]) -> dict[str, Any] | None:
+        students = students_doc.get("students", [])
+        by_id = {str(student.get("studentId")): student for student in students}
+        if str(student_id or "") in by_id:
+            return by_id[str(student_id)]
+        key = normalize_text(hint or "")
+        if not key:
+            return None
+        exact: list[dict[str, Any]] = []
+        for student in students:
+            name = normalize_text(student.get("name", ""))
+            aliases = [normalize_text(alias) for alias in student.get("aliases", [])]
+            if key == name or key in aliases or (len(name) >= 3 and name in key):
+                exact.append(student)
+        if len(exact) == 1:
+            return exact[0]
+        if len(exact) > 1:
+            return None
+        scored = [
+            (difflib.SequenceMatcher(None, key, normalize_text(student.get("name", ""))).ratio(), student)
+            for student in students
+        ]
+        scored.sort(key=lambda item: item[0], reverse=True)
+        if scored and scored[0][0] >= 0.88 and (len(scored) == 1 or scored[0][0] - scored[1][0] >= 0.08):
+            return scored[0][1]
+        return None
+
+    def merge_into(
+        self,
+        grades_doc: dict[str, Any],
+        result: dict[str, Any],
+        model: str,
+        photo_hash: str,
+        students_doc: dict[str, Any],
+        schedule_doc: dict[str, Any],
+        review_sink: list[dict[str, Any]],
+        review_ids: set[str],
+        recognised_at: str | None = None,
+    ) -> MergeStats:
+        stats = MergeStats()
+        subject_id, subject = self._subject(result.get("document", {}), schedule_doc)
+        now = recognised_at or iso_now()
+        today = today_moscow()
+        grades = grades_doc.setdefault("grades", [])
+        for cell in result.get("cells", []):
+            student = self._student(cell.get("studentId"), cell.get("studentHint"), students_doc)
+            lesson_date = safe_date(cell.get("date"))
+            if student is None or lesson_date is None:
+                stats.unresolved += 1
+                continue
+            if lesson_date > today + timedelta(days=7) or lesson_date < today - timedelta(days=370):
+                stats.unresolved += 1
+                continue
+            value = str(cell.get("value", ""))
+            entry_type = str(cell.get("entryType", "daily"))
+            if value not in VALID_GRADE_VALUES or entry_type not in ENTRY_TYPES:
+                stats.unresolved += 1
+                continue
+            try:
+                confidence = max(0.0, min(1.0, float(cell.get("confidence", 0) or 0)))
+            except (TypeError, ValueError):
+                stats.unresolved += 1
+                continue
+            raw = str(cell.get("raw", "") or "")
+            ambiguous_handwriting = normalize_text(raw) in {"н", "h"} and value == "4"
+            if ambiguous_handwriting:
+                confidence = min(confidence, 0.5)
+            if confidence < 0.75:
+                stats.low += 1
+            status = "automatic" if confidence >= 0.9 and not ambiguous_handwriting else "pending"
+            student_id = str(student["studentId"])
+            grade_id = stable_hash(f"{student_id}|{subject_id}|{lesson_date.isoformat()}|{entry_type}")[:24]
+            candidate = {
+                "gradeId": grade_id,
+                "studentId": student_id,
+                "subjectId": subject_id,
+                "subject": subject,
+                "lessonDate": lesson_date.isoformat(),
+                "entryType": entry_type,
+                "value": value,
+                "raw": raw or value,
+                "confidence": confidence,
+                "source": "gemini",
+                "sourceHash": photo_hash,
+                "model": model,
+                "promptVersion": PROMPT_VERSION,
+                "recognitionSchemaVersion": RECOGNITION_SCHEMA_VERSION,
+                "recognisedAt": now,
+                "status": status,
+                "evidence": [photo_hash],
+            }
+            existing = next((grade for grade in grades if grade.get("gradeId") == grade_id), None)
+            if existing is None:
+                grades.append(candidate)
+                stats.added += 1
+                stats.changed = True
+                continue
+            if existing.get("value") == value:
+                evidence = existing.setdefault("evidence", [])
+                if photo_hash not in evidence:
+                    evidence.append(photo_hash)
+                    stats.changed = True
+                if float(existing.get("confidence", 0) or 0) < confidence:
+                    existing["confidence"] = confidence
+                    stats.changed = True
+                if existing.get("status") == "pending" and status == "automatic":
+                    existing["status"] = "automatic"
+                    stats.changed = True
+                stats.same += 1
+                continue
+            review_id = stable_hash(f"{grade_id}|{existing.get('value')}|{value}")[:24]
+            old_status = existing.get("status")
+            if review_id not in review_ids:
+                review = {
+                    "reviewId": review_id,
+                    "gradeId": grade_id,
+                    "studentId": student_id,
+                    "subjectId": subject_id,
+                    "subject": subject,
+                    "lessonDate": lesson_date.isoformat(),
+                    "entryType": entry_type,
+                    "oldValue": existing.get("value"),
+                    "newValue": value,
+                    "oldConfidence": float(existing.get("confidence", 0) or 0),
+                    "newConfidence": confidence,
+                    "reason": (
+                        "Рукописный символ похож на Н и 4; нужно подтверждение."
+                        if ambiguous_handwriting
+                        else "На новом фото другое значение. Старое значение сохранено до подтверждения."
+                    ),
+                    "status": "pending",
+                    "createdAt": now,
+                    "candidate": candidate,
+                }
+                review_sink.append(review)
+                review_ids.add(review_id)
+                stats.changed = True
+            if old_status != "confirmed" and old_status != "conflict":
+                existing["status"] = "conflict"
+                stats.changed = True
+            stats.conflicts += 1
+        return stats
+
+    @staticmethod
+    def pending_reviews(documents: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            item for item in documents["reviews.json"].get("items", [])
+            if item.get("status") == "pending"
+        ]
+
+    @staticmethod
+    def resolve_review_in_docs(
+        grades_doc: dict[str, Any],
+        reviews_doc: dict[str, Any],
+        review_id: str,
+        accept: bool,
+        user_id: int,
+        now: str | None = None,
+    ) -> bool:
+        review = next(
+            (item for item in reviews_doc.get("items", []) if item.get("reviewId") == review_id and item.get("status") == "pending"),
+            None,
+        )
+        if review is None:
+            return False
+        resolved_at = now or iso_now()
+        review["status"] = "confirmed" if accept else "rejected"
+        review["resolvedAt"] = resolved_at
+        review["resolvedBy"] = user_id
+        grade = next((item for item in grades_doc.get("grades", []) if item.get("gradeId") == review.get("gradeId")), None)
+        if accept:
+            candidate = clone_json(review["candidate"])
+            candidate.update({
+                "status": "confirmed",
+                "confirmedBy": user_id,
+                "confirmedAt": resolved_at,
+            })
+            if grade is None:
+                grades_doc.setdefault("grades", []).append(candidate)
+            else:
+                grade.clear()
+                grade.update(candidate)
+        elif grade is not None:
+            grade["status"] = "confirmed"
+            grade["confirmedBy"] = user_id
+            grade["confirmedAt"] = resolved_at
+        return True
+
+    def resolve_review(self, storage: GitHubStorage, review_id: str, accept: bool, user_id: int) -> bool:
+        result_holder: dict[str, bool] = {}
+
+        def mutate(documents: dict[str, dict[str, Any]]) -> None:
+            result_holder["ok"] = self.resolve_review_in_docs(
+                documents["grades.json"],
+                documents["reviews.json"],
+                review_id,
+                accept,
+                user_id,
+            )
+
+        storage.publish_all(
+            mutate,
+            f"review-{review_id}-{'yes' if accept else 'no'}",
+            "resolve journal review",
+        )
+        return result_holder.get("ok", False)
+
+
+# =============================================================================
 # Telegram-инфраструктура
 # =============================================================================
 
@@ -2487,6 +3719,52 @@ class UpdateGuard:
             self.inflight.discard(update_id)
 
 
+@dataclass
+class PhotoBatch:
+    user_id: int
+    chat_id: int
+    photos: list[PhotoInput] = field(default_factory=list)
+    mode: str = "journal"
+    caption: str = ""
+    timer: asyncio.Task | None = None
+    created_at: float = field(default_factory=time.time)
+    last_update: float = field(default_factory=time.time)
+    ack_sent: bool = False
+
+
+@dataclass
+class PhotoOutcome:
+    pages: int = 0
+    added: int = 0
+    same: int = 0
+    low: int = 0
+    conflicts: int = 0
+    unresolved: int = 0
+    failed: int = 0
+    skipped: int = 0
+    quota_message: str = ""
+    models: tuple[str, ...] = ()
+
+    def summary(self) -> str:
+        lines = [
+            f"Обработано страниц: {self.pages}",
+            f"Новых оценок: {self.added}",
+            f"Совпало с существующими: {self.same}",
+            f"Низкая уверенность: {self.low}",
+            f"Конфликтов: {self.conflicts}",
+            f"Не распознано: {self.failed}",
+        ]
+        if self.unresolved:
+            lines.append(f"Клеток без ученика или даты: {self.unresolved}")
+        if self.skipped:
+            lines.append(f"Пропущено уже обработанных фото: {self.skipped}")
+        if self.quota_message:
+            lines.append(self.quota_message)
+        if self.pages == 0 and self.failed == 0:
+            lines.append("Страницы не содержали оценок; опубликованные данные не изменены.")
+        return "\n".join(lines)
+
+
 class Backend:
     def __init__(
         self,
@@ -2494,6 +3772,7 @@ class Backend:
         storage: GitHubStorage | None = None,
         local: LocalState | None = None,
         quota: Quota | None = None,
+        gemini: GeminiClient | None = None,
     ):
         self.config = config
         self.local = local or LocalState(config.bot_state_file)
@@ -2507,9 +3786,11 @@ class Backend:
         self.schedule = ScheduleService()
         self.homework = HomeworkService(self.storage, self.schedule)
         self.duties = DutyService(self.storage)
+        self.grades = GradeService()
+        self.gemini = gemini or GeminiClient(config, self.quota)
         self.update_guard = UpdateGuard(self.local)
         self.started_at = now_moscow()
-        self.batches: dict[int, Any] = {}
+        self.batches: dict[tuple[int, str], PhotoBatch] = {}
         self.batch_lock = asyncio.Lock()
         self.scheduler: BotScheduler | None = None
 
@@ -2539,6 +3820,350 @@ class Backend:
 
     def queue_size(self) -> int:
         return len(self.batches)
+
+    def process_photos(self, photos: list[PhotoInput]) -> PhotoOutcome:
+        unique: list[PhotoInput] = []
+        seen: set[str] = set()
+        for photo in photos:
+            if photo.sha256 not in seen:
+                seen.add(photo.sha256)
+                unique.append(photo)
+        outcome = PhotoOutcome()
+        if not unique:
+            return outcome
+        documents, _ = self.storage.read_documents()
+        recognised: list[RecognisedPage] = []
+        models: set[str] = set()
+        for photo in unique:
+            if self.local.image_done(photo.sha256):
+                outcome.skipped += 1
+                continue
+            try:
+                result = self.gemini.recognise_with_fallback(
+                    photo,
+                    documents["students.json"],
+                    documents["schedule.json"],
+                )
+            except QuotaExceeded as exc:
+                outcome.quota_message = str(exc)
+                break
+            except UserFacingError as exc:
+                outcome.failed += 1
+                LOG.warning("recognition failed hash=%s: %s", photo.sha256[:12], safe_exception(exc, self.secrets))
+                continue
+            except ExternalServiceError as exc:
+                outcome.failed += 1
+                LOG.warning("recognition service failed hash=%s: %s", photo.sha256[:12], safe_exception(exc, self.secrets))
+                continue
+            except Exception as exc:
+                outcome.failed += 1
+                LOG.error("recognition crashed hash=%s: %s", photo.sha256[:12], safe_exception(exc, self.secrets))
+                continue
+            recognised.append(RecognisedPage(photo, result))
+            models.add(result.model)
+
+        if recognised:
+            recognised_at = iso_now()
+            stats_holder: dict[str, MergeStats] = {"stats": MergeStats()}
+
+            def mutate(all_documents: dict[str, dict[str, Any]]) -> None:
+                review_sink: list[dict[str, Any]] = []
+                review_ids = {
+                    str(item.get("reviewId"))
+                    for item in all_documents["reviews.json"].get("items", [])
+                }
+                aggregate = MergeStats()
+                for page in recognised:
+                    page_stats = self.grades.merge_into(
+                        all_documents["grades.json"],
+                        page.result.response,
+                        page.result.model,
+                        page.photo.sha256,
+                        documents["students.json"],
+                        documents["schedule.json"],
+                        review_sink,
+                        review_ids,
+                        recognised_at=recognised_at,
+                    )
+                    aggregate.added += page_stats.added
+                    aggregate.same += page_stats.same
+                    aggregate.low += page_stats.low
+                    aggregate.conflicts += page_stats.conflicts
+                    aggregate.unresolved += page_stats.unresolved
+                    aggregate.changed = aggregate.changed or page_stats.changed
+                existing_reviews = {
+                    str(item.get("reviewId"))
+                    for item in all_documents["reviews.json"].get("items", [])
+                }
+                for review in review_sink:
+                    if review["reviewId"] not in existing_reviews:
+                        all_documents["reviews.json"].setdefault("items", []).append(review)
+                        existing_reviews.add(review["reviewId"])
+                        aggregate.changed = True
+                stats_holder["stats"] = aggregate
+
+            event_id = "batch-" + stable_hash("|".join(sorted(page.photo.sha256 for page in recognised)))[:24]
+            self.storage.publish_all(mutate, event_id, "merge journal grades")
+            stats = stats_holder["stats"]
+            outcome.pages = len(recognised)
+            outcome.added = stats.added
+            outcome.same = stats.same
+            outcome.low = stats.low
+            outcome.conflicts = stats.conflicts
+            outcome.unresolved = stats.unresolved
+            for page in recognised:
+                self.local.mark_image(page.photo.sha256)
+        outcome.models = tuple(sorted(models))
+        return outcome
+
+    def save_homework_photos(
+        self,
+        caption: str,
+        user_id: int,
+        update_id: int | None,
+        assigned: date,
+        photos: list[PhotoInput],
+        documents: dict[str, dict[str, Any]],
+    ) -> HomeworkResult:
+        if not photos:
+            raise UserFacingError("Не получил изображение.")
+        unique: list[PhotoInput] = []
+        seen: set[str] = set()
+        for photo in photos:
+            if photo.sha256 not in seen:
+                seen.add(photo.sha256)
+                unique.append(photo)
+        if len(unique) > 6:
+            raise UserFacingError("К одному заданию можно приложить не больше 6 изображений.")
+        attachments: list[dict[str, Any]] = []
+        for photo in unique:
+            data, mime, ext, width, height = GeminiClient.homework_image(photo)
+            digest = hashlib.sha256(data).hexdigest()
+            url = self.storage.upload_media(data, ext, digest)
+            attachments.append({
+                "attachmentId": "att-" + digest[:20],
+                "url": url,
+                "fileName": f"homework-{digest[:12]}.{ext}",
+                "mimeType": mime,
+                "size": len(data),
+                "width": width,
+                "height": height,
+                "sha256": digest,
+                "createdAt": iso_now(),
+            })
+        return self.homework.add(
+            caption,
+            user_id,
+            update_id,
+            assigned,
+            documents,
+            attachments=attachments,
+            allow_empty_text=True,
+        )
+
+    def import_replacements(
+        self,
+        pdf_bytes: bytes,
+        source: str,
+        source_url: str = "",
+        fallback_date: date | None = None,
+    ) -> ReplacementImportResult:
+        source_hash = hashlib.sha256(pdf_bytes).hexdigest()
+        text = ReplacementParser.extract_text(pdf_bytes)
+        documents, _ = self.storage.read_documents()
+        parsed = ReplacementParser.parse(
+            text,
+            documents["schedule.json"],
+            source,
+            source_hash,
+            source_url=source_url,
+            fallback_date=fallback_date,
+        )
+        if parsed.status == "no-108m":
+            parsed.message = "В PDF нет строк для группы 108М. Замены не изменены."
+            return parsed
+        holder: dict[str, Any] = {"changed": False, "recalculated": 0}
+
+        def mutate(all_documents: dict[str, dict[str, Any]]) -> None:
+            items = all_documents["replacements.json"].setdefault("items", [])
+            before = json_dumps_stable(items)
+            existing_by_id = {str(item.get("replacementId")): item for item in items}
+            for row in parsed.rows:
+                previous = existing_by_id.get(row["replacementId"])
+                if previous and all(
+                    previous.get(field) == row.get(field)
+                    for field in ("date", "weekType", "pairNumber", "newSubjectId", "newSubject", "newRoom", "cancelled", "sourceHash")
+                ):
+                    row["receivedAt"] = previous.get("receivedAt", row["receivedAt"])
+            fresh_ids = {row["replacementId"] for row in parsed.rows}
+            kept = [item for item in items if item.get("replacementId") not in fresh_ids]
+            items[:] = kept + parsed.rows
+            items.sort(key=lambda item: (str(item.get("date", "")), int(item.get("pairNumber", 0))))
+            holder["changed"] = json_dumps_stable(items) != before
+            holder["recalculated"] = self.homework.recalculate(all_documents, today_moscow())
+            if holder["recalculated"]:
+                holder["changed"] = True
+
+        event_id = "replacements-" + source_hash[:24]
+        result = self.storage.publish_all(mutate, event_id, "import replacements PDF")
+        parsed.changed = bool(holder["changed"])
+        parsed.recalculated = int(holder["recalculated"])
+        parsed.message = (
+            f"Замены на {date_label_full(parsed.target_date)} опубликованы: {len(parsed.rows)}."
+            if parsed.changed
+            else f"Замены на {date_label_full(parsed.target_date)} уже актуальны."
+        )
+        return parsed
+
+    def import_replacements_from_vk(self, target: date) -> ReplacementImportResult:
+        if not self.config.vk_enabled:
+            return ReplacementImportResult(
+                "vk-disabled",
+                target_date=target,
+                message="VK не настроен: перешлите PDF замен в бота вручную.",
+            )
+        client = VKClient(self.config)
+        found = client.find_post(target)
+        if found is None:
+            return ReplacementImportResult(
+                "vk-not-found",
+                target_date=target,
+                message="В VK не нашёл пост с PDF замен на нужную дату.",
+            )
+        url, title = found
+        pdf_bytes = client.download_pdf(url)
+        return self.import_replacements(
+            pdf_bytes,
+            source=f"VK: {title}"[:120],
+            source_url=url if url.startswith("https://") else "",
+            fallback_date=target,
+        )
+
+    async def add_photo(
+        self,
+        user_id: int,
+        chat_id: int,
+        photo: PhotoInput,
+        bot: Any,
+        caption: str = "",
+        homework: bool = False,
+    ) -> tuple[str, int, str]:
+        mode = "homework" if homework else "journal"
+        async with self.batch_lock:
+            now = time.time()
+            if not homework and not caption:
+                # Фото без подписи сразу после ДЗ-фото — продолжение задания.
+                homework_batch = self.batches.get((user_id, "homework"))
+                if homework_batch is not None and now - homework_batch.last_update <= BATCH_MAX_AGE_SECONDS:
+                    mode = "homework"
+                    caption = homework_batch.caption
+            key = (user_id, mode)
+            batch = self.batches.get(key)
+            if batch is not None and now - batch.last_update > BATCH_MAX_AGE_SECONDS:
+                if batch.timer is not None:
+                    batch.timer.cancel()
+                batch = None
+            if batch is None:
+                batch = PhotoBatch(user_id=user_id, chat_id=chat_id, mode=mode, caption=caption)
+                self.batches[key] = batch
+            if mode == "homework":
+                batch.caption = caption or batch.caption
+            if len(batch.photos) >= MAX_BATCH_FILES:
+                return "limit", len(batch.photos), batch.mode
+            if any(item.sha256 == photo.sha256 for item in batch.photos):
+                return "duplicate", len(batch.photos), batch.mode
+            batch.photos.append(photo)
+            batch.last_update = now
+            if batch.timer is not None:
+                batch.timer.cancel()
+            batch.timer = asyncio.create_task(self._finish_batch(user_id, bot), name=f"batch-{user_id}-{mode}")
+            return "added", len(batch.photos), batch.mode
+
+    async def _finish_batch(self, user_id: int, bot: Any) -> None:
+        try:
+            await asyncio.sleep(BATCH_IDLE_SECONDS)
+        except asyncio.CancelledError:
+            return
+        async with self.batch_lock:
+            candidates = [
+                (key, batch)
+                for key, batch in self.batches.items()
+                if key[0] == user_id
+            ]
+            if not candidates:
+                return
+            # Таймер один на пользователя; завершаем только «созревшие» батчи.
+            ready: list[tuple[tuple[int, str], PhotoBatch]] = []
+            for key, batch in candidates:
+                if time.time() - batch.last_update < BATCH_IDLE_SECONDS:
+                    if batch.timer is not None:
+                        batch.timer.cancel()
+                    batch.timer = asyncio.create_task(self._finish_batch(user_id, bot), name=f"batch-{user_id}-{key[1]}")
+                    continue
+                ready.append((key, batch))
+                self.batches.pop(key, None)
+            if not ready:
+                return
+        for _, batch in ready:
+            await self._finish_one_batch(batch, bot)
+
+    async def _finish_one_batch(self, batch: PhotoBatch, bot: Any) -> None:
+        if batch.mode == "homework":
+            try:
+                documents, _ = await asyncio.to_thread(self.storage.read_documents)
+                result = await asyncio.to_thread(
+                    self.save_homework_photos,
+                    batch.caption,
+                    batch.user_id,
+                    None,
+                    today_moscow(),
+                    batch.photos,
+                    documents,
+                )
+                await bot.send_message(
+                    batch.chat_id,
+                    _homework_reply(result, documents["schedule.json"]),
+                    disable_web_page_preview=True,
+                )
+            except UserFacingError as exc:
+                await bot.send_message(batch.chat_id, str(exc))
+            except StorageBusyError:
+                await bot.send_message(batch.chat_id, "Публикация данных не завершена. Фото не изменены; отправьте позже.")
+            except StorageError:
+                await bot.send_message(batch.chat_id, "Опубликованные данные повреждены. Фото не изменены.")
+            except ExternalServiceError:
+                await bot.send_message(batch.chat_id, "Не удалось загрузить вложение в GitHub. Фото не изменены; повторите позже.")
+            except Exception as exc:
+                LOG.error("homework photo batch failed: %s", safe_exception(exc, self.secrets))
+                await bot.send_message(batch.chat_id, "Не удалось сохранить фото задания. Данные не изменены.")
+            return
+        try:
+            outcome = await asyncio.to_thread(self.process_photos, batch.photos)
+            await bot.send_message(batch.chat_id, outcome.summary(), disable_web_page_preview=True)
+        except UserFacingError as exc:
+            await bot.send_message(batch.chat_id, str(exc))
+        except StorageBusyError:
+            await bot.send_message(batch.chat_id, "Публикация данных не завершена. Фото не изменены; отправьте позже.")
+        except StorageError:
+            await bot.send_message(batch.chat_id, "Опубликованные данные повреждены. Фото не изменены.")
+        except ExternalServiceError:
+            await bot.send_message(batch.chat_id, "Внешний сервис недоступен. Фото не изменены; повторите позже.")
+        except Exception as exc:
+            LOG.error("photo batch failed: %s", safe_exception(exc, self.secrets))
+            await bot.send_message(batch.chat_id, "Не удалось обработать фотографии. Опубликованные данные не изменены.")
+
+    async def cancel_batch(self, user_id: int) -> int:
+        async with self.batch_lock:
+            keys = [key for key in self.batches if key[0] == user_id]
+            count = 0
+            for key in keys:
+                batch = self.batches.pop(key, None)
+                if batch is None:
+                    continue
+                if batch.timer is not None:
+                    batch.timer.cancel()
+                count += len(batch.photos)
+            return count
 
 
 backend: Backend | None = None
@@ -2634,8 +4259,9 @@ async def start_command(update: Any, context: Any) -> None:
         "Привет! Это дневник группы 108М.\n\n"
         "• Расписание, оценки, ДЗ, дежурства и замены — на сайте.\n"
         "• ДЗ: «Математика выучить логарифмы 10.09».\n"
+        "• Фото к ДЗ: подпись «ДЗ Математика выучить логарифмы».\n"
         "• Дежурство: «Дежурили Абакаев, Бадреев, Осадчий».\n"
-        "• Журнал: отправь фото или альбом.\n"
+        "• Журнал: отправь фото или альбом без подписи.\n"
         "• Замены: перешли PDF из VK.\n\n"
         "/help — подробная инструкция.",
     )
@@ -2651,13 +4277,22 @@ async def help_command(update: Any, context: Any) -> None:
         "Пример: «Математика выучить логарифмы 10.09».\n"
         "Дата может быть в конце: ДД.ММ, ДД.ММ.ГГ или ДД.ММ.ГГГГ. Без даты берётся дата сообщения. "
         "Задание появится на сайте под ближайшим уроком этого предмета строго после даты выдачи. "
-        "Замены и чётность недели учитываются. Повторное сообщение с тем же предметом и датой обновит текст.\n\n"
+        "Замены и чётность недели учитываются. Второе сообщение по тому же предмету добавляет ещё одно "
+        "задание — оно показывается ниже первого. Одинаковый текст дважды не дублируется.\n\n"
+        "ФОТО К ДОМАШНЕМУ ЗАДАНИЮ\n"
+        "Отправь фото с подписью «ДЗ Математика выучить логарифмы». "
+        "Можно приложить до 6 фото к одному заданию. Фото без подписи считаются фотографиями журнала.\n\n"
         "ДЕЖУРСТВА\n"
         "Сообщение: «Дежурили Абакаев, Бадреев, Осадчий».\n"
         "Можно фамилию, имя или ФИО. Бот засчитает только однозначно найденных людей. "
-        "Если имя неоднозначное — попросит написать точнее и ничего не засчитает.\n\n"
+        "Если имя неоднозначное — попросит написать точнее и ничего не засчитает. "
+        "Два отчёта за день объединяются: засчитаны будут все, кого называли.\n\n"
+        "ПОЖЕЛАНИЯ ПО ПАРАМ\n"
+        "/pair Абакаев Бадреев — сохранить пожелание дежурить вместе.\n"
+        "/unpair Абакаев Бадреев — удалить пожелание.\n"
+        "/pairs — показать сохранённые пары. Достаточно фамилий.\n\n"
         "ЖУРНАЛ\n"
-        "Отправь фото страницы или Telegram-альбом. Бот сам определит момент окончания загрузки. "
+        "Отправь фото страницы или Telegram-альбом без подписи. Бот сам определит момент окончания загрузки. "
         "Максимум 20 изображений в одной загрузке; повторное фото по hash не отправляется в Gemini. "
         "PDF и другие документы как журнал не принимаются.\n\n"
         "ЗАМЕНЫ\n"
@@ -2667,6 +4302,9 @@ async def help_command(update: Any, context: Any) -> None:
         "/today — расписание, замены и ДЗ на сегодня\n"
         "/grades — как смотреть оценки и сколько записей опубликовано\n"
         "/duties — последние дежурства\n"
+        "/pair — добавить пожелание по паре дежурных\n"
+        "/unpair — удалить пожелание\n"
+        "/pairs — показать пожелания\n"
         "/review — спорные оценки\n"
         "/status — очередь, ревизия и квоты Gemini\n"
         "/cancel — отменить незавершённую загрузку фото\n"
@@ -2757,10 +4395,272 @@ async def status_command(update: Any, context: Any) -> None:
 
 
 @authorized
+async def cancel_command(update: Any, context: Any) -> None:
+    current = require_backend()
+    user_id = int(update.effective_user.id)
+    count = await current.cancel_batch(user_id)
+    if count:
+        await reply_text(update, f"Незавершённая загрузка отменена: {count} фото не обработано.")
+    else:
+        await reply_text(update, "Незавершённой загрузки фото нет.")
+
+
+@authorized
+async def review_command(update: Any, context: Any) -> None:
+    current = require_backend()
+    documents, _ = await current.read_documents()
+    reviews = GradeService.pending_reviews(documents)
+    if not reviews:
+        await reply_text(update, "Спорных оценок нет. Все записи подтверждены или однозначны.")
+        return
+    students = {student["studentId"]: student.get("name", student["studentId"]) for student in documents["students.json"].get("students", [])}
+    lines = ["Спорные оценки. Подтвердите новое значение или оставьте старое."]
+    keyboard = []
+    for review in reviews[:6]:
+        lines.append(
+            f"\n{review.get('lessonDate')} · {review.get('subject')} · {students.get(review.get('studentId'), '')}"
+            f"\n{review.get('oldValue')} → {review.get('newValue')} · {review.get('reason')}"
+        )
+        keyboard.append([
+            InlineKeyboardButton(
+                f"Подтвердить {review.get('newValue')}",
+                callback_data=f"review:yes:{review.get('reviewId')}",
+            ),
+            InlineKeyboardButton(
+                f"Оставить {review.get('oldValue')}",
+                callback_data=f"review:no:{review.get('reviewId')}",
+            ),
+        ])
+    if len(reviews) > 6:
+        lines.append(f"\nПоказаны первые 6 из {len(reviews)}. Остальные появятся после решения этих.")
+    message = _message_of(update)
+    if message is not None:
+        await message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard), disable_web_page_preview=True)
+
+
+@authorized
+async def review_callback(update: Any, context: Any) -> None:
+    query = getattr(update, "callback_query", None)
+    if query is None:
+        return
+    try:
+        await query.answer()
+    except Exception:
+        pass
+    current = require_backend()
+    try:
+        _, action, review_id = str(query.data or "").split(":", 2)
+        if action not in ("yes", "no") or not re.fullmatch(r"[A-Za-z0-9]{8,64}", review_id):
+            raise ValueError("bad callback")
+        ok = await asyncio.to_thread(
+            current.grades.resolve_review,
+            current.storage,
+            review_id,
+            action == "yes",
+            int(update.effective_user.id),
+        )
+        text = "Решение сохранено." if ok else "Эта запись уже решена."
+        try:
+            await query.edit_message_text(text)
+        except Exception:
+            await reply_text(update, text)
+    except UserFacingError as exc:
+        try:
+            await query.edit_message_text(str(exc))
+        except Exception:
+            await reply_text(update, str(exc))
+    except Exception as exc:
+        LOG.error("review callback failed: %s", safe_exception(exc, current.secrets))
+        try:
+            await query.edit_message_text("Не удалось сохранить решение. Повторите /review.")
+        except Exception:
+            pass
+
+
+@authorized
+async def handle_image(update: Any, context: Any) -> None:
+    current = require_backend()
+    message = _message_of(update)
+    if message is None:
+        return
+    caption = str(getattr(message, "caption", "") or "").strip()
+    homework_match = HOMEWORK_CAPTION_RE.match(caption) if caption else None
+    is_homework = homework_match is not None
+    homework_caption = caption[homework_match.end():].strip() if homework_match else ""
+    if is_homework and not homework_caption:
+        await reply_text(
+            update,
+            "Укажи в подписи предмет и задание, например: "
+            "«ДЗ Математика выучить логарифмы». Так фото привяжется к ДЗ.",
+        )
+        return
+    document = getattr(message, "document", None)
+    if document is not None:
+        mime = (getattr(document, "mime_type", "") or "").lower()
+        if not mime.startswith("image/"):
+            await reply_text(update, "Для журнала принимаются только изображения, не PDF и не другие документы.")
+            return
+        if mime == "image/jpg":
+            mime = "image/jpeg"
+        file_id = document.file_id
+        file_name = document.file_name or "journal-image"
+        file_size = int(document.file_size or 0)
+    else:
+        photos = getattr(message, "photo", None) or []
+        if not photos:
+            return
+        telegram_photo = photos[-1]
+        file_id = telegram_photo.file_id
+        file_name = "telegram-photo.jpg"
+        file_size = int(telegram_photo.file_size or 0)
+        mime = "image/jpeg"
+    if file_size > MAX_IMAGE_BYTES:
+        await reply_text(update, "Изображение слишком большое (максимум 12 МБ).")
+        return
+    try:
+        telegram_file = await context.bot.get_file(file_id)
+        raw = bytes(await telegram_file.download_as_bytearray())
+    except Exception as exc:
+        LOG.warning("telegram file download failed: %s", safe_exception(exc, current.secrets))
+        await reply_text(update, "Не удалось скачать изображение из Telegram. Попробуйте ещё раз.")
+        return
+    if len(raw) > MAX_IMAGE_BYTES:
+        await reply_text(update, "Изображение слишком большое (максимум 12 МБ).")
+        return
+    photo = PhotoInput(raw, mime, file_name, hashlib.sha256(raw).hexdigest())
+    if not is_homework and current.local.image_done(photo.sha256):
+        await reply_text(update, "Это фото уже было обработано; повторно в Gemini не отправляю.")
+        return
+    status, count, mode = await current.add_photo(
+        int(update.effective_user.id),
+        int(message.chat_id),
+        photo,
+        context.bot,
+        caption=homework_caption,
+        homework=is_homework,
+    )
+    if status == "limit":
+        await reply_text(update, f"В одной загрузке максимум {MAX_BATCH_FILES} изображений.")
+    elif status == "duplicate":
+        await reply_text(update, "Это фото уже в текущей очереди — второй раз не добавляю.")
+    elif count == 1:
+        if mode == "homework":
+            await reply_text(update, "Фото принято. Сохраню его как вложение к домашнему заданию после короткой паузы.")
+        else:
+            await reply_text(update, "Фото принято. Обработаю после короткой паузы, чтобы дождаться остальных фото альбома.")
+
+
+@authorized
+async def handle_document(update: Any, context: Any) -> None:
+    current = require_backend()
+    message = _message_of(update)
+    document = getattr(message, "document", None)
+    if document is None:
+        return
+    mime = str(getattr(document, "mime_type", "") or "").lower()
+    file_name = str(getattr(document, "file_name", "") or "").lower()
+    is_pdf = mime == "application/pdf" or file_name.endswith(".pdf")
+    if not is_pdf:
+        await reply_text(
+            update,
+            "Документ не похож на PDF замен. Пришлите PDF файлом или фото журнала как изображение.",
+        )
+        return
+    file_size = int(getattr(document, "file_size", 0) or 0)
+    if file_size > MAX_PDF_BYTES:
+        await reply_text(update, "PDF слишком большой (максимум 10 МБ).")
+        return
+    try:
+        telegram_file = await context.bot.get_file(document.file_id)
+        raw = bytes(await telegram_file.download_as_bytearray())
+    except Exception as exc:
+        LOG.warning("telegram pdf download failed: %s", safe_exception(exc, current.secrets))
+        await reply_text(update, "Не удалось скачать PDF из Telegram. Попробуйте ещё раз.")
+        return
+    if len(raw) > MAX_PDF_BYTES:
+        await reply_text(update, "PDF слишком большой (максимум 10 МБ).")
+        return
+    await reply_text(update, "PDF получен. Разбираю замены только для группы 108М…")
+    try:
+        result = await asyncio.to_thread(
+            current.import_replacements,
+            raw,
+            "Telegram forwarded PDF",
+            "",
+            _message_day(update),
+        )
+    except UserFacingError as exc:
+        await reply_text(update, str(exc))
+        return
+    if result.status == "no-108m" or not result.rows:
+        await reply_text(
+            update,
+            f"В этом PDF нет строк для 108М на {date_label_full(result.target_date)}. "
+            "Расписание не изменено.",
+        )
+        return
+    lines = [result.message]
+    for row in result.rows:
+        subject = row.get("newSubject") or "—"
+        room = f", каб. {row['newRoom']}" if row.get("newRoom") else ""
+        mark = " (отмена)" if row.get("cancelled") else ""
+        lines.append(f"— {row['pairNumber']} пара: {subject}{room}{mark}")
+    if result.recalculated:
+        lines.append(f"Пересчитаны домашние задания: {result.recalculated}.")
+    await reply_text(update, "\n".join(lines))
+
+
+@authorized
 async def duties_command(update: Any, context: Any) -> None:
     current = require_backend()
     documents, _ = await current.read_documents()
     await reply_text(update, DutyService.describe_recent(documents, limit=10))
+
+
+@authorized
+async def pairs_command(update: Any, context: Any) -> None:
+    current = require_backend()
+    documents, _ = await current.read_documents()
+    await reply_text(update, DutyService.describe_pair_preferences(documents))
+
+
+async def _change_pair(update: Any, context: Any, remove: bool) -> None:
+    current = require_backend()
+    tokens = list(getattr(context, "args", None) or [])
+    if not tokens:
+        await reply_text(update, "Укажи две фамилии: /pair Абакаев Бадреев")
+        return
+    documents, _ = await current.read_documents()
+    try:
+        names, changed = await asyncio.to_thread(
+            current.duties.update_pair,
+            tokens,
+            documents["students.json"],
+            documents,
+            remove,
+        )
+    except UserFacingError as exc:
+        await reply_text(update, str(exc))
+        return
+    pair_text = f"{names[0]} + {names[1]}"
+    if not changed:
+        await reply_text(update, f"Такая пара уже {'отсутствует' if remove else 'сохранена'}: {pair_text}.")
+        return
+    await reply_text(
+        update,
+        f"Пара {'удалена' if remove else 'сохранена'}: {pair_text}.\n"
+        "Бот учтёт пожелание при следующем выборе дежурных."
+    )
+
+
+@authorized
+async def pair_command(update: Any, context: Any) -> None:
+    await _change_pair(update, context, remove=False)
+
+
+@authorized
+async def unpair_command(update: Any, context: Any) -> None:
+    await _change_pair(update, context, remove=True)
 
 
 def _message_day(update: Any) -> date:
@@ -2771,6 +4671,28 @@ def _message_day(update: Any) -> date:
             value = value.replace(tzinfo=UTC)
         return value.astimezone(TZ).date()
     return today_moscow()
+
+
+def _homework_reply(result: HomeworkResult, schedule_doc: dict[str, Any]) -> str:
+    draft = result.draft
+    if result.status == "attached":
+        lines = [f"Добавил фото к ДЗ: {draft.subject} — {draft.text}"]
+    elif result.status == "duplicate":
+        if result.attachment_added:
+            lines = [f"Такое ДЗ уже есть: {draft.subject} — {draft.text}"]
+        else:
+            lines = [f"Такое ДЗ уже есть: {draft.subject} — {draft.text}"]
+    else:
+        lines = [f"Добавил ДЗ: {draft.subject} — {draft.text}"]
+    lines.append("Следующий урок: " + HomeworkService.describe(draft, schedule_doc) + ".")
+    if result.status == "added" and result.siblings:
+        lines.append(
+            f"По этому предмету на урок уже {result.siblings + 1} "
+            f"{plural_ru(result.siblings + 1, 'задание', 'задания', 'заданий')} — новое показано ниже."
+        )
+    if draft.moved:
+        lines.append("Урок перенесён из-за замены — задание привязано к следующему действующему уроку.")
+    return "\n".join(lines)
 
 
 @authorized
@@ -2795,11 +4717,11 @@ async def handle_text(update: Any, context: Any) -> None:
             documents,
         )
         if result.status == "confirmed":
-            await reply_text(
-                update,
-                "Отчёт принят: " + ", ".join(result.names) + ".\n"
-                "Засчитаю только этих людей при закрытии дня. Счётчики обновятся после 00:00.",
-            )
+            lines = ["Отчёт принят: " + ", ".join(result.added_names or result.names) + "."]
+            if result.all_names and set(result.all_names) != set(result.names):
+                lines.append("Итого за сегодня: " + ", ".join(result.all_names) + ".")
+            lines.append("Засчитаю всех упомянутых при закрытии дня. Счётчики обновятся после 00:00.")
+            await reply_text(update, "\n".join(lines))
         else:
             ambiguous = ", ".join(result.ambiguous) if result.ambiguous else "не найдено"
             await reply_text(
@@ -2817,13 +4739,7 @@ async def handle_text(update: Any, context: Any) -> None:
         day,
         documents,
     )
-    draft = result.draft
-    verbs = {"added": "Добавил", "updated": "Обновил", "duplicate": "Такое ДЗ уже есть"}
-    lines = [f"{verbs.get(result.status, 'Сохранил')} ДЗ: {draft.subject} — {draft.text}"]
-    lines.append("Следующий урок: " + HomeworkService.describe(draft, documents["schedule.json"]) + ".")
-    if draft.moved:
-        lines.append("Урок перенесён из-за замены — задание привязано к следующему действующему уроку.")
-    await reply_text(update, "\n".join(lines))
+    await reply_text(update, _homework_reply(result, documents["schedule.json"]))
 
 
 async def error_handler(update: object, context: Any) -> None:
@@ -2867,7 +4783,15 @@ def build_application(config: Config) -> Any:
     application.add_handler(CommandHandler("today", today_command))
     application.add_handler(CommandHandler("grades", grades_command))
     application.add_handler(CommandHandler("duties", duties_command))
+    application.add_handler(CommandHandler("pair", pair_command))
+    application.add_handler(CommandHandler("unpair", unpair_command))
+    application.add_handler(CommandHandler("pairs", pairs_command))
+    application.add_handler(CommandHandler("review", review_command))
+    application.add_handler(CommandHandler("cancel", cancel_command))
     application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CallbackQueryHandler(review_callback, pattern=r"^review:(yes|no):"))
+    application.add_handler(MessageHandler(filters.Document.PDF, handle_document))
+    application.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_image))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     application.add_error_handler(error_handler)
     return application
@@ -2899,7 +4823,6 @@ def main() -> None:
     application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=False)
 
 
-# __PART_4__
 
 if __name__ == "__main__":
     main()

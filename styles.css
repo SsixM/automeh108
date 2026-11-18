@@ -1016,7 +1016,21 @@ input[type="date"]:hover { border-color: var(--line-strong); }
 }
 
 .task-date-head h2 { margin: 0; font-size: 18px; }
+.task-date-line { margin: 4px 0 0; color: var(--muted); font-size: 11.5px; font-weight: 600; }
 .task-lesson-meta { color: var(--muted); font-size: 11px; font-weight: 700; }
+.count-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 700;
+  white-space: nowrap;
+}
 
 .task-list { display: grid; gap: 9px; }
 .task-card { padding: 15px; }
@@ -1024,6 +1038,29 @@ input[type="date"]:hover { border-color: var(--line-strong); }
 .task-text { margin: 10px 0 0; font-size: 14.5px; line-height: 1.45; overflow-wrap: anywhere; white-space: pre-wrap; }
 .task-meta { display: flex; flex-wrap: wrap; gap: 7px 12px; margin-top: 9px; color: var(--muted); font-size: 10.5px; }
 .task-moved { color: var(--amber-ink); font-weight: 700; }
+.task-attachments {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+.task-attachment {
+  display: block;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-soft);
+  aspect-ratio: 4 / 3;
+}
+.task-attachment img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform 180ms ease;
+}
+.task-attachment:hover img,
+.task-attachment:focus-visible img { transform: scale(1.03); }
+.task-attachment:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* Duties */
 
@@ -1177,7 +1214,6 @@ input[type="date"]:hover { border-color: var(--line-strong); }
   .controls-card { grid-template-columns: auto minmax(0, 1fr); align-items: end; column-gap: 18px; }
   .subject-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .week-toolbar-card { padding: 16px 18px; }
-  .task-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .tasks-summary .segmented { margin-left: auto; }
   .main-content { gap: 20px; }
 }

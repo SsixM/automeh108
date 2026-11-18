@@ -29,7 +29,27 @@
           "updatedAt": {"type": "string", "format": "date-time"},
           "completedAt": {"type": "string", "format": "date-time"},
           "sourceUserId": {"type": "integer"},
-          "sourceUpdateId": {"type": "integer"}
+          "sourceUpdateId": {"type": "integer"},
+          "attachments": {
+            "type": "array",
+            "maxItems": 6,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["attachmentId", "url", "fileName", "mimeType", "size", "sha256", "createdAt"],
+              "properties": {
+                "attachmentId": {"type": "string", "minLength": 8},
+                "url": {"type": "string", "pattern": "^https://"},
+                "fileName": {"type": "string", "minLength": 1, "maxLength": 120},
+                "mimeType": {"enum": ["image/jpeg", "image/png", "image/webp"]},
+                "size": {"type": "integer", "minimum": 1, "maximum": 8388608},
+                "width": {"type": "integer", "minimum": 1, "maximum": 20000},
+                "height": {"type": "integer", "minimum": 1, "maximum": 20000},
+                "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+                "createdAt": {"type": "string", "format": "date-time"}
+              }
+            }
+          }
         }
       }
     }
