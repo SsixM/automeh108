@@ -1663,6 +1663,356 @@ class ScheduleService:
 
 
 # =============================================================================
+# Домашние задания
+# =============================================================================
+
+SUBJECT_ALIASES: dict[str, str] = {
+    "математика": "math",
+    "матем": "math",
+    "математике": "math",
+    "русский язык": "russian",
+    "русский": "russian",
+    "рус": "russian",
+    "иностранный язык": "english",
+    "иностранный": "english",
+    "английский язык": "english",
+    "английский": "english",
+    "англ": "english",
+    "англ яз": "english",
+    "ин яз": "english",
+    "обизр": "obizr",
+    "обж": "obizr",
+    "основы безопасности": "obizr",
+    "введение в специальность": "intro",
+    "введение": "intro",
+    "введ": "intro",
+    "химия": "chemistry",
+    "химии": "chemistry",
+    "биология": "biology",
+    "биологии": "biology",
+    "био": "biology",
+    "информатика": "informatics",
+    "информатике": "informatics",
+    "инфа": "informatics",
+    "история": "history",
+    "истории": "history",
+    "родная литература": "literature",
+    "литература": "literature",
+    "литературе": "literature",
+    "физическая культура": "pe",
+    "физкультура": "pe",
+    "физкультуре": "pe",
+    "физра": "pe",
+    "физ ра": "pe",
+    "физ к": "pe",
+}
+
+SERVICE_SUBJECT_ALIASES = {
+    "разговоры о важном",
+    "классный час",
+    "россия мои горизонты",
+    "горизонты",
+}
+
+END_DATE_RE = re.compile(r"(?<!\d)(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?\s*$")
+
+
+class HomeworkDraft:
+    def __init__(
+        self,
+        subject_id: str,
+        subject: str,
+        text: str,
+        assigned_date: date,
+        next_lesson: dict[str, Any],
+        naive_lesson: dict[str, Any] | None,
+        moved: bool,
+    ):
+        self.subject_id = subject_id
+        self.subject = subject
+        self.text = text
+        self.assigned_date = assigned_date
+        self.next_lesson = next_lesson
+        self.naive_lesson = naive_lesson
+        self.moved = moved
+
+    @property
+    def task_id(self) -> str:
+        return stable_hash(f"{self.subject_id}|{self.assigned_date.isoformat()}")[:24]
+
+    @property
+    def next_lesson_date(self) -> str:
+        return str(self.next_lesson["date"])
+
+    @property
+    def next_lesson_id(self) -> str:
+        return str(self.next_lesson["lessonId"])
+
+
+class HomeworkResult:
+    def __init__(self, status: str, draft: HomeworkDraft, existing_text: str | None = None):
+        self.status = status  # added | updated | duplicate
+        self.draft = draft
+        self.existing_text = existing_text
+
+
+class HomeworkService:
+    def __init__(self, storage: GitHubStorage, schedule: ScheduleService):
+        self.storage = storage
+        self.schedule = schedule
+
+    @staticmethod
+    def _catalog_with_aliases(schedule_doc: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+        catalog = ScheduleService.subject_catalog(schedule_doc)
+        aliases: dict[str, str] = {}
+        for subject_id, item in catalog.items():
+            aliases[item["key"]] = subject_id
+        for alias, subject_id in SUBJECT_ALIASES.items():
+            if subject_id in catalog:
+                aliases.setdefault(normalize_text(alias), subject_id)
+        return catalog, aliases
+
+    def _find_subject(self, text: str, schedule_doc: dict[str, Any]) -> tuple[str, str, str]:
+        catalog, aliases = self._catalog_with_aliases(schedule_doc)
+        words = text.split()
+        if not words:
+            raise UserFacingError("Пустое сообщение. Начни с названия предмета.")
+        normalized_text = normalize_text(text)
+        for service_alias in SERVICE_SUBJECT_ALIASES:
+            if normalized_text == service_alias or normalized_text.startswith(service_alias + " "):
+                raise UserFacingError("Это служебное событие, а не учебный предмет. ДЗ к нему не создаётся.")
+        exact: list[tuple[int, int, str]] = []
+        for count in range(1, min(5, len(words)) + 1):
+            candidate = normalize_text(" ".join(words[:count]))
+            if candidate in aliases:
+                exact.append((count, len(candidate), aliases[candidate]))
+        if exact:
+            exact.sort(key=lambda item: (-item[1], item[0]))
+            best_count, best_length, subject_id = exact[0]
+            same_length = {item[2] for item in exact if item[1] == best_length}
+            if len(same_length) > 1:
+                raise UserFacingError("Не понял предмет: подходят несколько вариантов. Напиши полное название.")
+            remaining = " ".join(words[best_count:]).strip()
+            self._reject_second_subject(remaining, aliases)
+            return subject_id, catalog[subject_id]["subject"], remaining
+
+        first = normalize_text(words[0])
+        scores: list[tuple[float, str]] = []
+        for alias, subject_id in aliases.items():
+            first_alias_word = alias.split()[0]
+            score = max(
+                difflib.SequenceMatcher(None, first, alias).ratio(),
+                difflib.SequenceMatcher(None, first, first_alias_word).ratio(),
+            )
+            scores.append((score, subject_id))
+        scores.sort(reverse=True, key=lambda item: item[0])
+        if scores and scores[0][0] >= 0.78:
+            if len(scores) > 1 and scores[0][0] - scores[1][0] < 0.08 and scores[0][1] != scores[1][1]:
+                raise UserFacingError("Не понял предмет: похожие варианты. Напиши точное название предмета.")
+            subject_id = scores[0][1]
+            remaining = " ".join(words[1:]).strip()
+            self._reject_second_subject(remaining, aliases)
+            return subject_id, catalog[subject_id]["subject"], remaining
+        raise UserFacingError(
+            "Не распознал предмет. Начни сообщение с предмета из расписания, например: "
+            "«Математика выучить логарифмы 10.09»."
+        )
+
+    @staticmethod
+    def _reject_second_subject(remaining: str, aliases: Mapping[str, str]) -> None:
+        words = remaining.split()
+        if not words:
+            return
+        for count in range(1, min(3, len(words)) + 1):
+            if normalize_text(" ".join(words[:count])) in aliases:
+                raise UserFacingError("В сообщении несколько предметов. Отправь отдельное сообщение для каждого.")
+
+    @staticmethod
+    def _extract_date(text: str, assigned: date) -> tuple[date, str]:
+        match = END_DATE_RE.search(text)
+        if not match:
+            return assigned, text.strip(" .,:;—-")
+        day, month, year = match.groups()
+        year_value = int(year) if year else assigned.year
+        if year_value < 100:
+            year_value += 2000
+        try:
+            parsed = date(year_value, int(month), int(day))
+        except ValueError as exc:
+            raise UserFacingError("Дата задания некорректна.") from exc
+        if not year and parsed > assigned + timedelta(days=31):
+            try:
+                parsed = parsed.replace(year=parsed.year - 1)
+            except ValueError as exc:
+                raise UserFacingError("Дата задания некорректна.") from exc
+        if parsed > assigned + timedelta(days=31):
+            raise UserFacingError("Дата задания слишком далеко в будущем. Проверь день и месяц.")
+        cleaned = (text[:match.start()] + " " + text[match.end():]).strip(" .,:;—-")
+        return parsed, cleaned
+
+    def parse(
+        self,
+        text: str,
+        assigned: date,
+        schedule_doc: dict[str, Any],
+        replacements_doc: dict[str, Any] | None,
+    ) -> HomeworkDraft:
+        if len(text) > 1000:
+            raise UserFacingError("Сообщение слишком длинное для домашнего задания.")
+        subject_id, subject, remaining = self._find_subject(text.strip(), schedule_doc)
+        assigned_date, homework = self._extract_date(remaining, assigned)
+        homework = SPACE_RE.sub(" ", homework).strip()
+        if not homework:
+            raise UserFacingError("После предмета напиши текст задания. Например: «Математика выучить логарифмы 10.09».")
+        next_lesson = self.schedule.next_lesson(subject_id, assigned_date, schedule_doc, replacements_doc)
+        if next_lesson is None:
+            raise UserFacingError("Не нашёл следующий урок этого предмета в расписании. Сообщение не сохранено.")
+        naive_lesson = self.schedule.next_lesson(subject_id, assigned_date, schedule_doc, None)
+        moved = bool(naive_lesson and (naive_lesson.get("date") != next_lesson.get("date") or naive_lesson.get("lessonId") != next_lesson.get("lessonId")))
+        return HomeworkDraft(subject_id, subject, homework, assigned_date, next_lesson, naive_lesson, moved)
+
+    @staticmethod
+    def _status_for(draft: HomeworkDraft) -> str:
+        if draft.next_lesson_date < today_moscow().isoformat():
+            return "просрочено"
+        if draft.moved:
+            return "перенесено"
+        return "актуальное"
+
+    def add(
+        self,
+        text: str,
+        user_id: int,
+        update_id: int | None,
+        assigned: date,
+        documents: dict[str, dict[str, Any]],
+    ) -> HomeworkResult:
+        draft = self.parse(text, assigned, documents["schedule.json"], documents["replacements.json"])
+        result_holder: dict[str, Any] = {}
+
+        def mutate(tasks_doc: dict[str, Any]) -> None:
+            tasks = tasks_doc.setdefault("tasks", [])
+            existing = next((task for task in tasks if task.get("taskId") == draft.task_id), None)
+            if existing is None:
+                existing = next(
+                    (
+                        task for task in tasks
+                        if task.get("subjectId") == draft.subject_id
+                        and task.get("assignedDate") == draft.assigned_date.isoformat()
+                    ),
+                    None,
+                )
+            now = iso_now()
+            if existing is not None:
+                same_update = update_id is not None and existing.get("sourceUpdateId") == update_id
+                same_text = existing.get("text") == draft.text
+                same_lesson = existing.get("nextLessonId") == draft.next_lesson_id
+                if same_update or (same_text and same_lesson and existing.get("assignedDate") == draft.assigned_date.isoformat()):
+                    result_holder["status"] = "duplicate"
+                    result_holder["existing_text"] = existing.get("text")
+                    return
+                existing.update({
+                    "subjectId": draft.subject_id,
+                    "subject": draft.subject,
+                    "text": draft.text,
+                    "assignedDate": draft.assigned_date.isoformat(),
+                    "nextLessonDate": draft.next_lesson_date,
+                    "nextLessonId": draft.next_lesson_id,
+                    "movedByReplacement": draft.moved,
+                    "updatedAt": now,
+                    "sourceUserId": user_id,
+                })
+                if update_id is not None:
+                    existing["sourceUpdateId"] = update_id
+                if draft.moved:
+                    existing.setdefault("originalNextLessonDate", (draft.naive_lesson or {}).get("date", draft.next_lesson_date))
+                if existing.get("status") != "выполнено":
+                    existing["status"] = self._status_for(draft)
+                result_holder["status"] = "updated"
+                result_holder["existing_text"] = existing.get("text")
+                return
+            task = {
+                "taskId": draft.task_id,
+                "subjectId": draft.subject_id,
+                "subject": draft.subject,
+                "text": draft.text,
+                "assignedDate": draft.assigned_date.isoformat(),
+                "nextLessonDate": draft.next_lesson_date,
+                "nextLessonId": draft.next_lesson_id,
+                "movedByReplacement": draft.moved,
+                "status": self._status_for(draft),
+                "createdAt": now,
+                "updatedAt": now,
+                "sourceUserId": user_id,
+            }
+            if draft.moved:
+                task["originalNextLessonDate"] = (draft.naive_lesson or {}).get("date", draft.next_lesson_date)
+            if update_id is not None:
+                task["sourceUpdateId"] = update_id
+            tasks.append(task)
+            result_holder["status"] = "added"
+            result_holder["existing_text"] = None
+
+        self.storage.publish({"tasks.json": mutate}, f"task-{draft.task_id}", "add or update homework")
+        return HomeworkResult(
+            result_holder.get("status", "duplicate"),
+            draft,
+            result_holder.get("existing_text"),
+        )
+
+    def recalculate(self, documents: dict[str, dict[str, Any]], today: date | None = None) -> int:
+        """Пересчитать следующие уроки и статусы после замен/полуночи."""
+        current_day = today or today_moscow()
+        changed = 0
+        schedule_doc = documents["schedule.json"]
+        replacements_doc = documents["replacements.json"]
+        for task in documents["tasks.json"].get("tasks", []):
+            if task.get("status") == "выполнено":
+                continue
+            task_changed = False
+            assigned = safe_date(task.get("assignedDate"))
+            if assigned is None:
+                continue
+            lesson = self.schedule.next_lesson(task.get("subjectId", ""), assigned, schedule_doc, replacements_doc)
+            if lesson is None:
+                continue
+            naive = self.schedule.next_lesson(task.get("subjectId", ""), assigned, schedule_doc, None)
+            moved = bool(naive and (naive.get("date") != lesson.get("date") or naive.get("lessonId") != lesson.get("lessonId")))
+            new_status = "просрочено" if str(lesson["date"]) < current_day.isoformat() else ("перенесено" if moved else "актуальное")
+            if task.get("nextLessonDate") != lesson["date"] or task.get("nextLessonId") != lesson["lessonId"]:
+                task["nextLessonDate"] = lesson["date"]
+                task["nextLessonId"] = lesson["lessonId"]
+                task_changed = True
+            if moved and not task.get("originalNextLessonDate"):
+                task["originalNextLessonDate"] = (naive or {}).get("date", lesson["date"])
+                task_changed = True
+            if bool(task.get("movedByReplacement")) != moved:
+                task["movedByReplacement"] = moved
+                task_changed = True
+            if task.get("status") != new_status:
+                task["status"] = new_status
+                task_changed = True
+            if task_changed:
+                task["updatedAt"] = iso_now()
+                changed += 1
+        return changed
+
+    @staticmethod
+    def describe(draft: HomeworkDraft, schedule_doc: dict[str, Any]) -> str:
+        times = ScheduleService.times_by_pair(schedule_doc)
+        pair = int(draft.next_lesson.get("pairNumber", 0))
+        clock = times.get(pair, {})
+        next_date = safe_date(draft.next_lesson_date)
+        date_text = date_label_full(next_date) if next_date else draft.next_lesson_date
+        parts = [f"{date_text}, {pair} пара"]
+        if clock:
+            parts.append(f"{clock.get('start', '')}–{clock.get('end', '')}")
+        if draft.next_lesson.get("room"):
+            parts.append(f"каб. {draft.next_lesson['room']}")
+        return " · ".join(part for part in parts if part)
+
+
+# =============================================================================
 # Telegram-инфраструктура
 # =============================================================================
 
@@ -1713,6 +2063,7 @@ class Backend:
         )
         self.storage = storage or GitHubStorage(config)
         self.schedule = ScheduleService()
+        self.homework = HomeworkService(self.storage, self.schedule)
         self.update_guard = UpdateGuard(self.local)
         self.started_at = now_moscow()
         self.batches: dict[int, Any] = {}
