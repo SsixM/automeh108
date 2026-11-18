@@ -2013,6 +2013,448 @@ class HomeworkService:
 
 
 # =============================================================================
+# Дежурства
+# =============================================================================
+
+DUTY_PREFIX_RE = re.compile(
+    r"^\s*(?:дежурили|дежурил[аи]?|дежурные|отч[её]т\s+о\s+дежурств[еа])\b[:\s—–-]*",
+    re.IGNORECASE,
+)
+DUTY_COMMON_WORDS = {
+    "сегодня", "дежурили", "дежурил", "дежурила", "дежурные", "дежурство",
+    "человек", "человека", "ученик", "ученика", "учеников", "смена", "пара", "и",
+}
+
+
+class DutyParseResult:
+    def __init__(self, student_ids: list[str], names: list[str], ambiguous: list[str], ignored: list[str]):
+        self.student_ids = student_ids
+        self.names = names
+        self.ambiguous = ambiguous
+        self.ignored = ignored
+
+
+class DutyReportResult:
+    def __init__(self, status: str, names: list[str], ambiguous: list[str], day_status: str):
+        self.status = status
+        self.names = names
+        self.ambiguous = ambiguous
+        self.day_status = day_status
+
+
+class DutyCloseResult:
+    def __init__(self, status: str, names: list[str], already_closed: bool = False):
+        self.status = status
+        self.names = names
+        self.already_closed = already_closed
+
+
+class DutyService:
+    ALGORITHM_VERSION = DUTY_ALGORITHM_VERSION
+
+    def __init__(self, storage: GitHubStorage):
+        self.storage = storage
+
+    @staticmethod
+    def _students(students_doc: dict[str, Any]) -> list[dict[str, Any]]:
+        return sorted(students_doc.get("students", []), key=lambda item: str(item.get("studentId", "")))
+
+    @classmethod
+    def seed_for(cls, day: date, students_doc: dict[str, Any]) -> str:
+        students = cls._students(students_doc)
+        version = stable_hash(json_dumps_stable(students))
+        return stable_hash(f"{day.isoformat()}|{GROUP_NAME}|{version}|{cls.ALGORITHM_VERSION}")
+
+    @staticmethod
+    def _ensure_student_records(duties_doc: dict[str, Any], students_doc: dict[str, Any]) -> None:
+        records = duties_doc.setdefault("students", {})
+        for student in students_doc.get("students", []):
+            student_id = str(student["studentId"])
+            record = records.setdefault(student_id, {"name": student.get("name", ""), "count": 0})
+            record["name"] = student.get("name", record.get("name", ""))
+            record["count"] = int(record.get("count", 0) or 0)
+
+    @classmethod
+    def select_for(
+        cls,
+        day: date,
+        students_doc: dict[str, Any],
+        duties_doc: dict[str, Any],
+    ) -> list[str]:
+        if day.isoweekday() > 5:
+            raise UserFacingError("В выходные дежурства не назначаются без отдельного исключения.")
+        cls._ensure_student_records(duties_doc, students_doc)
+        records = duties_doc.get("students", {})
+        if not records:
+            raise UserFacingError("Список учеников пуст: дежурных выбрать нельзя.")
+        counts = {student_id: int(record.get("count", 0) or 0) for student_id, record in records.items()}
+        minimum = min(counts.values())
+        layer = sorted(student_id for student_id, count in counts.items() if count == minimum)
+        seed = cls.seed_for(day, students_doc)
+        rng = random.Random(int(seed[:16], 16))
+        if len(layer) >= 2:
+            return rng.sample(layer, 2)
+        selected = layer[:1]
+        next_counts = sorted({count for count in counts.values() if count > minimum})
+        if next_counts:
+            second_layer = sorted(
+                student_id for student_id, count in counts.items()
+                if count == next_counts[0] and student_id not in selected
+            )
+        else:
+            second_layer = sorted(student_id for student_id in counts if student_id not in selected)
+        if not second_layer:
+            raise UserFacingError("Не удалось выбрать второго дежурного: список учеников слишком мал.")
+        selected.append(rng.choice(second_layer))
+        return selected
+
+    @classmethod
+    def _ensure_day_in_doc(
+        cls,
+        day: date,
+        duties_doc: dict[str, Any],
+        students_doc: dict[str, Any],
+    ) -> dict[str, Any]:
+        cls._ensure_student_records(duties_doc, students_doc)
+        days = duties_doc.setdefault("days", [])
+        existing = next((item for item in days if item.get("date") == day.isoformat()), None)
+        if existing is not None:
+            return existing
+        if day.isoweekday() > 5:
+            raise UserFacingError("В выходные дежурства не назначаются.")
+        selected = cls.select_for(day, students_doc, duties_doc)
+        names = {
+            str(student["studentId"]): str(student.get("name", ""))
+            for student in students_doc.get("students", [])
+        }
+        item = {
+            "date": day.isoformat(),
+            "selected": selected,
+            "selectedNames": [names.get(student_id, student_id) for student_id in selected],
+            "actual": [],
+            "actualNames": [],
+            "reports": [],
+            "status": "selected",
+            "seed": cls.seed_for(day, students_doc),
+            "algorithmVersion": cls.ALGORITHM_VERSION,
+            "closed": False,
+        }
+        days.append(item)
+        days.sort(key=lambda entry: str(entry.get("date", "")))
+        return item
+
+    def ensure_day(self, day: date, documents: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        result_holder: dict[str, Any] = {}
+
+        def mutate(duties_doc: dict[str, Any]) -> None:
+            result_holder["day"] = clone_json(
+                self._ensure_day_in_doc(day, duties_doc, documents["students.json"])
+            )
+
+        self.storage.publish({"duties.json": mutate}, f"duty-select-{day.isoformat()}", "select duty")
+        return result_holder.get("day", {})
+
+    @classmethod
+    def _resolve_name_token(
+        cls,
+        query: str,
+        students_doc: dict[str, Any],
+    ) -> tuple[dict[str, Any] | None, bool]:
+        students = cls._students(students_doc)
+        scored: list[tuple[float, dict[str, Any]]] = []
+        for student in students:
+            full = normalize_text(student.get("name", ""))
+            parts = full.split()
+            surname = parts[0] if parts else ""
+            given = parts[1] if len(parts) > 1 else ""
+            terms = {full, surname, given}
+            for alias in student.get("aliases", []):
+                terms.add(normalize_text(alias))
+            best = 0.0
+            for term in terms:
+                if not term:
+                    continue
+                if query == term:
+                    score = 1.0
+                elif len(query) >= 3 and (query in term or (len(term) >= 3 and term in query)):
+                    score = 0.97
+                else:
+                    score = difflib.SequenceMatcher(None, query, term).ratio()
+                best = max(best, score)
+            scored.append((best, student))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        if not scored or scored[0][0] < 0.80:
+            return None, True
+        if len(scored) > 1 and scored[0][0] - scored[1][0] < 0.08:
+            return None, True
+        return scored[0][1], False
+
+    @classmethod
+    def parse_report(cls, text: str, students_doc: dict[str, Any]) -> DutyParseResult | None:
+        match = DUTY_PREFIX_RE.match(text or "")
+        if not match:
+            return None
+        body = (text or "")[match.end():].strip()
+        body = re.sub(r"^\s*(?:сегодня\s+)?\d+\s*(?:человек[а]?|ученик[а]?|учеников)?\s*[:\s—–-]*", "", body, flags=re.I)
+        body = body.strip(" .,:;—-")
+        if not body:
+            return DutyParseResult([], [], [], [])
+        parts = [part for part in re.split(r"[,;\n]+|\s+и\s+|\s*/\s*", body) if part.strip()]
+        if len(parts) == 1 and len(parts[0].split()) > 1:
+            parts = parts[0].split()
+        ids: list[str] = []
+        names: list[str] = []
+        ambiguous: list[str] = []
+        ignored: list[str] = []
+        for raw in parts:
+            cleaned = re.sub(r"^\s*\d+\s*[.)]?\s*", "", raw).strip(" .,:;—-")
+            query = normalize_text(cleaned)
+            if not query or query in DUTY_COMMON_WORDS:
+                continue
+            if len(query) < 3:
+                ignored.append(cleaned)
+                continue
+            student, is_ambiguous = cls._resolve_name_token(query, students_doc)
+            if is_ambiguous or student is None:
+                ambiguous.append(cleaned)
+                continue
+            student_id = str(student["studentId"])
+            if student_id not in ids:
+                ids.append(student_id)
+                names.append(str(student.get("name", student_id)))
+        return DutyParseResult(ids, names, ambiguous, ignored)
+
+    def add_report(
+        self,
+        day: date,
+        text: str,
+        user_id: int,
+        update_id: int | None,
+        documents: dict[str, dict[str, Any]],
+    ) -> DutyReportResult:
+        students_doc = documents["students.json"]
+        parsed = self.parse_report(text, students_doc)
+        if parsed is None:
+            raise UserFacingError("Не понял отчёт. Формат: «Дежурили Абакаев, Бадреев, Осадчий».")
+        if not parsed.student_ids and not parsed.ambiguous:
+            raise UserFacingError("Не нашёл имён в отчёте. Ничего не засчитано; напиши ФИО или фамилии точнее.")
+        status = "pending" if parsed.ambiguous or not parsed.student_ids else "confirmed"
+        report_id = stable_hash(f"{day.isoformat()}|{user_id}|{update_id}|{normalize_text(text)}")[:24]
+        result_holder: dict[str, Any] = {}
+
+        def mutate(duties_doc: dict[str, Any]) -> None:
+            day_entry = self._ensure_day_in_doc(day, duties_doc, students_doc)
+            if day_entry.get("closed"):
+                raise UserFacingError("Этот день уже закрыт. Отчёт не изменяет счётчики.")
+            reports = day_entry.setdefault("reports", [])
+            existing = next((report for report in reports if report.get("reportId") == report_id), None)
+            if existing is not None:
+                result_holder["status"] = existing.get("status")
+                result_holder["names"] = list(existing.get("studentNames", []))
+                result_holder["ambiguous"] = list(existing.get("ambiguous", []))
+                result_holder["day_status"] = day_entry.get("status")
+                return
+            reports.append({
+                "reportId": report_id,
+                "userId": user_id,
+                "receivedAt": iso_now(),
+                "status": status,
+                "studentIds": parsed.student_ids,
+                "studentNames": parsed.names,
+                "ambiguous": parsed.ambiguous,
+                "messageHash": stable_hash(normalize_text(text)),
+            })
+            day_entry["status"] = "reported" if status == "confirmed" else "pending"
+            result_holder["status"] = status
+            result_holder["names"] = parsed.names
+            result_holder["ambiguous"] = parsed.ambiguous
+            result_holder["day_status"] = day_entry["status"]
+
+        self.storage.publish({"duties.json": mutate}, f"duty-report-{report_id}", "duty report")
+        return DutyReportResult(
+            result_holder.get("status", status),
+            result_holder.get("names", parsed.names),
+            result_holder.get("ambiguous", parsed.ambiguous),
+            result_holder.get("day_status", "pending"),
+        )
+
+    @classmethod
+    def _close_day_in_doc(
+        cls,
+        day: date,
+        duties_doc: dict[str, Any],
+        students_doc: dict[str, Any],
+    ) -> DutyCloseResult:
+        cls._ensure_student_records(duties_doc, students_doc)
+        day_entry = next((item for item in duties_doc.setdefault("days", []) if item.get("date") == day.isoformat()), None)
+        if day_entry is None:
+            return DutyCloseResult("no-selection", [])
+        if day_entry.get("closed"):
+            names = duties_doc.get("students", {})
+            actual_names = [
+                names.get(student_id, {}).get("name", student_id)
+                for student_id in day_entry.get("actual", [])
+            ]
+            return DutyCloseResult("already-closed", actual_names, already_closed=True)
+        confirmed = [report for report in day_entry.get("reports", []) if report.get("status") == "confirmed"]
+        report = confirmed[-1] if confirmed else None
+        day_entry["closed"] = True
+        day_entry["closedAt"] = iso_now()
+        if report is None:
+            day_entry["actual"] = []
+            day_entry["actualNames"] = []
+            day_entry["status"] = "closed-without-confirmation"
+            return DutyCloseResult("closed-without-confirmation", [])
+        actual = list(dict.fromkeys(report.get("studentIds", [])))
+        actual_names = [
+            duties_doc.get("students", {}).get(student_id, {}).get("name")
+            or next((student.get("name", "") for student in students_doc.get("students", []) if student.get("studentId") == student_id), student_id)
+            for student_id in actual
+        ]
+        day_entry["actual"] = actual
+        day_entry["actualNames"] = actual_names
+        day_entry["status"] = "closed"
+        for student_id in actual:
+            record = duties_doc.setdefault("students", {}).setdefault(
+                student_id,
+                {"name": next((student.get("name", "") for student in students_doc.get("students", []) if student.get("studentId") == student_id), student_id), "count": 0},
+            )
+            record["count"] = int(record.get("count", 0) or 0) + 1
+        return DutyCloseResult("closed", actual_names)
+
+    def close_day(self, day: date, documents: dict[str, dict[str, Any]]) -> DutyCloseResult:
+        result_holder: dict[str, Any] = {}
+
+        def mutate(duties_doc: dict[str, Any]) -> None:
+            result_holder["result"] = self._close_day_in_doc(day, duties_doc, documents["students.json"])
+
+        self.storage.publish({"duties.json": mutate}, f"duty-close-{day.isoformat()}", "close duty day")
+        return result_holder.get("result", DutyCloseResult("no-selection", []))
+
+    @staticmethod
+    def reason(day_entry: dict[str, Any] | None) -> str:
+        if not day_entry:
+            return "выбор ещё не опубликован"
+        if day_entry.get("status") in ("closed", "closed-without-confirmation"):
+            return "подтверждён сообщением" if day_entry.get("actual") else "не подтверждён"
+        if day_entry.get("status") == "reported":
+            return "ожидает закрытия дня"
+        if day_entry.get("status") == "pending":
+            return "ожидает проверки"
+        return "выбран"
+
+    @classmethod
+    def describe_recent(cls, documents: dict[str, dict[str, Any]], limit: int = 7) -> str:
+        days = sorted(documents["duties.json"].get("days", []), key=lambda item: str(item.get("date", "")), reverse=True)
+        if not days:
+            return "Дежурства ещё не выбирались. Бот сделает выбор в ближайший учебный день в 00:00 по Москве."
+        lines = ["Последние дежурства:"]
+        for day_entry in days[:limit]:
+            parsed_date = safe_date(day_entry.get("date"))
+            date_text = date_label_full(parsed_date) if parsed_date else str(day_entry.get("date", ""))
+            selected = ", ".join(day_entry.get("selectedNames", [])) or "—"
+            actual = ", ".join(day_entry.get("actualNames", [])) or "никто"
+            lines.append(f"{date_text}: выбраны {selected}; засчитаны {actual} · {cls.reason(day_entry)}")
+        records = documents["duties.json"].get("students", {})
+        if records:
+            lowest = min(int(record.get("count", 0) or 0) for record in records.values())
+            leaders = sorted(
+                record.get("name", student_id)
+                for student_id, record in records.items()
+                if int(record.get("count", 0) or 0) == lowest
+            )
+            if leaders:
+                lines.append("")
+                lines.append(f"Реже всех дежурили ({lowest}): " + ", ".join(leaders[:8]) + ("…" if len(leaders) > 8 else ""))
+        return "\n".join(lines)
+
+
+# =============================================================================
+# Ночная обработка
+# =============================================================================
+
+
+class BotScheduler:
+    """Идемпотентные задачи: закрытие дня, выбор на сегодня, пересчёт ДЗ."""
+
+    def __init__(self, current: "Backend"):
+        self.backend = current
+        self.task: asyncio.Task | None = None
+        self.catch_up_done = False
+
+    async def start(self, app: Any = None) -> None:
+        self.task = asyncio.create_task(self.loop(), name="108m-scheduler")
+
+    async def stop(self, app: Any = None) -> None:
+        if self.task is not None:
+            self.task.cancel()
+            await asyncio.gather(self.task, return_exceptions=True)
+            self.task = None
+
+    async def loop(self) -> None:
+        while True:
+            try:
+                await self.tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                LOG.error("scheduler tick failed: %s", safe_exception(exc, self.backend.secrets))
+            await asyncio.sleep(30)
+
+    async def tick(self) -> None:
+        now = now_moscow()
+        today = now.date()
+        if not self.catch_up_done:
+            await self.run_maintenance(today)
+            self.catch_up_done = True
+        if now.hour == 0:
+            marker = f"midnightDone:{today.isoformat()}"
+            if not self.backend.local.get(marker):
+                await self.run_maintenance(today)
+                self.backend.local.set(marker, iso_now())
+
+    async def run_maintenance(self, today: date) -> None:
+        documents, _ = await self.backend.read_documents()
+        students_doc = documents["students.json"]
+        closed_days: list[str] = []
+        ensured_today = False
+
+        def mutate_duties(duties_doc: dict[str, Any]) -> None:
+            nonlocal ensured_today
+            for day_entry in sorted(duties_doc.get("days", []), key=lambda item: str(item.get("date", ""))):
+                day_value = safe_date(day_entry.get("date"))
+                if day_value and day_value < today and not day_entry.get("closed"):
+                    result = DutyService._close_day_in_doc(day_value, duties_doc, students_doc)
+                    if result.status in ("closed", "closed-without-confirmation"):
+                        closed_days.append(day_value.isoformat())
+            if today.isoweekday() <= 5:
+                DutyService._ensure_day_in_doc(today, duties_doc, students_doc)
+                ensured_today = True
+
+        def mutate_tasks(tasks_doc: dict[str, Any]) -> None:
+            wrapper = {
+                "tasks.json": tasks_doc,
+                "schedule.json": documents["schedule.json"],
+                "replacements.json": documents["replacements.json"],
+            }
+            self.backend.homework.recalculate(wrapper, today)
+
+        result = await asyncio.to_thread(
+            self.backend.storage.publish,
+            {"duties.json": mutate_duties, "tasks.json": mutate_tasks},
+            f"maintenance-{today.isoformat()}-{secrets.token_hex(4)}",
+            "midnight duty and homework maintenance",
+        )
+        if result.changed:
+            LOG.info(
+                "maintenance revision=%s closed=%s today_selected=%s",
+                result.revision,
+                len(closed_days),
+                ensured_today,
+            )
+
+
+# =============================================================================
 # Telegram-инфраструктура
 # =============================================================================
 
@@ -2064,10 +2506,12 @@ class Backend:
         self.storage = storage or GitHubStorage(config)
         self.schedule = ScheduleService()
         self.homework = HomeworkService(self.storage, self.schedule)
+        self.duties = DutyService(self.storage)
         self.update_guard = UpdateGuard(self.local)
         self.started_at = now_moscow()
         self.batches: dict[int, Any] = {}
         self.batch_lock = asyncio.Lock()
+        self.scheduler: BotScheduler | None = None
 
     @property
     def secrets(self) -> tuple[str, ...]:
@@ -2312,6 +2756,76 @@ async def status_command(update: Any, context: Any) -> None:
     await reply_text(update, "\n".join(lines))
 
 
+@authorized
+async def duties_command(update: Any, context: Any) -> None:
+    current = require_backend()
+    documents, _ = await current.read_documents()
+    await reply_text(update, DutyService.describe_recent(documents, limit=10))
+
+
+def _message_day(update: Any) -> date:
+    message = _message_of(update)
+    value = getattr(message, "date", None)
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=UTC)
+        return value.astimezone(TZ).date()
+    return today_moscow()
+
+
+@authorized
+async def handle_text(update: Any, context: Any) -> None:
+    current = require_backend()
+    message = _message_of(update)
+    text = str(getattr(message, "text", "") or "").strip()
+    if not text:
+        return
+    documents, _ = await current.read_documents()
+    user_id = int(update.effective_user.id)
+    update_id = getattr(update, "update_id", None)
+    day = _message_day(update)
+
+    if DUTY_PREFIX_RE.match(text):
+        result = await asyncio.to_thread(
+            current.duties.add_report,
+            day,
+            text,
+            user_id,
+            update_id,
+            documents,
+        )
+        if result.status == "confirmed":
+            await reply_text(
+                update,
+                "Отчёт принят: " + ", ".join(result.names) + ".\n"
+                "Засчитаю только этих людей при закрытии дня. Счётчики обновятся после 00:00.",
+            )
+        else:
+            ambiguous = ", ".join(result.ambiguous) if result.ambiguous else "не найдено"
+            await reply_text(
+                update,
+                f"Не смог однозначно подтвердить: {ambiguous}.\n"
+                "Ничего не засчитано. Напиши ФИО или фамилии точнее — отчёт останется на проверке.",
+            )
+        return
+
+    result = await asyncio.to_thread(
+        current.homework.add,
+        text,
+        user_id,
+        update_id,
+        day,
+        documents,
+    )
+    draft = result.draft
+    verbs = {"added": "Добавил", "updated": "Обновил", "duplicate": "Такое ДЗ уже есть"}
+    lines = [f"{verbs.get(result.status, 'Сохранил')} ДЗ: {draft.subject} — {draft.text}"]
+    lines.append("Следующий урок: " + HomeworkService.describe(draft, documents["schedule.json"]) + ".")
+    if draft.moved:
+        lines.append("Урок перенесён из-за замены — задание привязано к следующему действующему уроку.")
+    await reply_text(update, "\n".join(lines))
+
+
 async def error_handler(update: object, context: Any) -> None:
     error = getattr(context, "error", None)
     current = backend
@@ -2324,17 +2838,37 @@ async def error_handler(update: object, context: Any) -> None:
             pass
 
 
+async def post_init(application: Any) -> None:
+    current = require_backend()
+    current.scheduler = BotScheduler(current)
+    await current.scheduler.start(application)
+
+
+async def post_shutdown(application: Any) -> None:
+    current = require_backend()
+    if current.scheduler is not None:
+        await current.scheduler.stop(application)
+
+
 def build_application(config: Config) -> Any:
     global backend
     if Application is None:
         raise ConfigError("Не установлены зависимости Telegram. Выполните: python -m pip install -r requirements.txt")
     backend = Backend(config)
-    application = Application.builder().token(config.telegram_token).build()
+    application = (
+        Application.builder()
+        .token(config.telegram_token)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("today", today_command))
     application.add_handler(CommandHandler("grades", grades_command))
+    application.add_handler(CommandHandler("duties", duties_command))
     application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     application.add_error_handler(error_handler)
     return application
 

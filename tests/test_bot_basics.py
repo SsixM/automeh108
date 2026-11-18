@@ -132,6 +132,7 @@ class FakeUser:
 class FakeMessage:
     def __init__(self):
         self.replies: list[str] = []
+        self.text = ""
 
     async def reply_text(self, text, **kwargs):
         self.replies.append(text)
@@ -153,6 +154,11 @@ class StubStorage:
     def read_documents(self):
         self.calls += 1
         return copy.deepcopy(self.docs), copy.deepcopy(self.manifest)
+
+    def publish(self, mutators, event_id, message):
+        for name, mutator in mutators.items():
+            mutator(self.docs[name])
+        return bot.PublishResult("stub-revision", True)
 
 
 def make_backend(tmp_path: Path, docs, manifest) -> tuple[bot.Backend, StubStorage]:
@@ -243,5 +249,76 @@ def test_backend_status_contains_no_secret(tmp_path: Path, data_dir: Path) -> No
         assert "telegram-secret" not in text
         assert "github-secret" not in text
         assert "gemini-secret" not in text
+    finally:
+        bot.backend = old_backend
+
+
+def test_duty_report_text_is_saved_and_duplicate_update_ignored(tmp_path: Path, data_dir: Path) -> None:
+    docs, manifest = load_seed(data_dir)
+    for record in docs["duties.json"]["students"].values():
+        record["count"] = 0
+    current, storage = make_backend(tmp_path, docs, manifest)
+    old_backend = bot.backend
+    bot.backend = current
+    try:
+        update = FakeUpdate(1001, 900)
+        update.effective_message.text = "Дежурили Абакаев, Бадреев, Осадчий"
+        asyncio.run(bot.handle_text(update, None))
+        text = "\n".join(update.effective_message.replies)
+        assert "Отчёт принят" in text
+        assert "Абакаев" in text
+        day = storage.docs["duties.json"]["days"][0]
+        assert day["reports"][0]["studentIds"] == ["s26", "s03", "s16"]
+        asyncio.run(bot.handle_text(update, None))
+        assert len(storage.docs["duties.json"]["days"][0]["reports"]) == 1
+    finally:
+        bot.backend = old_backend
+
+
+def test_homework_text_is_saved_and_reports_next_lesson(tmp_path: Path, data_dir: Path) -> None:
+    docs, manifest = load_seed(data_dir)
+    current, storage = make_backend(tmp_path, docs, manifest)
+    old_backend = bot.backend
+    bot.backend = current
+    try:
+        update = FakeUpdate(1001, 901)
+        update.effective_message.text = "Математика выучить логарифмы"
+        asyncio.run(bot.handle_text(update, None))
+        text = "\n".join(update.effective_message.replies)
+        assert "Добавил ДЗ" in text
+        assert "Следующий урок" in text
+        assert "Математика" in text
+        tasks = storage.docs["tasks.json"]["tasks"]
+        assert len(tasks) == 1
+        assert tasks[0]["text"] == "выучить логарифмы"
+    finally:
+        bot.backend = old_backend
+
+
+def test_duties_command_lists_history(tmp_path: Path, data_dir: Path) -> None:
+    docs, manifest = load_seed(data_dir)
+    docs["duties.json"]["days"] = [{
+        "date": "2026-11-17",
+        "selected": ["s01", "s02"],
+        "selectedNames": ["Аглиуллина Самира", "Алборов Михаил"],
+        "actual": ["s01"],
+        "actualNames": ["Аглиуллина Самира"],
+        "reports": [],
+        "status": "closed",
+        "seed": "a" * 64,
+        "algorithmVersion": bot.DUTY_ALGORITHM_VERSION,
+        "closed": True,
+        "closedAt": "2026-11-18T00:00:05+03:00",
+    }]
+    current, _ = make_backend(tmp_path, docs, manifest)
+    old_backend = bot.backend
+    bot.backend = current
+    try:
+        update = FakeUpdate(1001, 902)
+        asyncio.run(bot.duties_command(update, None))
+        text = "\n".join(update.effective_message.replies)
+        assert "17 ноября" in text
+        assert "Аглиуллина Самира" in text
+        assert "подтверждён сообщением" in text
     finally:
         bot.backend = old_backend
