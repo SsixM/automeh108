@@ -14,6 +14,8 @@ venv/
 bot_state.local.json
 vk_tokens.json
 1.py
+automeh.py
+PROMPT.md
 *.log
 *.tmp
 
