@@ -28,10 +28,10 @@
 
 ## Этап 3. Базовый Telegram-бот
 
-- [ ] 3.1 Allowlist по Telegram ID.
-- [ ] 3.2 `/start`, `/help`, `/today`, `/status`.
-- [ ] 3.3 Очередь и безопасные логи.
-- [ ] 3.4 Идемпотентность Telegram update.
+- [x] 3.1 Allowlist по Telegram ID.
+- [x] 3.2 `/start`, `/help`, `/today`, `/status`.
+- [x] 3.3 Очередь и безопасные логи.
+- [x] 3.4 Идемпотентность Telegram update.
 
 ## Этап 4. ДЗ и расписание в боте
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import difflib
+import functools
 import hashlib
 import json
 import logging
@@ -16,6 +17,7 @@ import random
 import re
 import secrets
 import socket
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -1042,6 +1044,12 @@ class LocalState:
             self._save_locked()
             return False
 
+    def has_update(self, update_id: int | None) -> bool:
+        if update_id is None:
+            return False
+        with self.lock:
+            return update_id in self._int_list(self.data.get("processedUpdates", []))
+
     def mark_update(self, update_id: int | None) -> None:
         if update_id is None:
             return
@@ -1472,5 +1480,543 @@ class GitHubStorage:
             raise ExternalServiceError("Не удалось опубликовать данные после нескольких попыток.") from last_error
 
 
-# __PART_3__
+# =============================================================================
+# Расписание
+# =============================================================================
+
+
+class ScheduleService:
+    """Чистые расчёты по schedule.json и replacements.json."""
+
+    @staticmethod
+    def week_type(day: date, schedule_doc: dict[str, Any], replacements_doc: dict[str, Any] | None = None) -> str:
+        meta = schedule_doc.get("meta", {})
+        anchor = safe_date(meta.get("weekAnchor")) or date(2026, 8, 31)
+        weeks = (day - anchor).days // 7
+        first = "denominator" if meta.get("firstWeekType") == "denominator" else "numerator"
+        computed = first if weeks % 2 == 0 else ("denominator" if first == "numerator" else "numerator")
+        if replacements_doc:
+            source_types = {
+                item.get("weekType")
+                for item in replacements_doc.get("items", [])
+                if item.get("date") == day.isoformat() and item.get("weekType") in ("numerator", "denominator")
+            }
+            if len(source_types) == 1:
+                return next(iter(source_types))
+        return computed
+
+    @staticmethod
+    def _valid_on(item: dict[str, Any], iso: str) -> bool:
+        valid_from = item.get("validFrom")
+        valid_to = item.get("validTo")
+        return (not valid_from or valid_from <= iso) and (not valid_to or iso <= valid_to)
+
+    def effective_lessons(
+        self,
+        day: date,
+        schedule_doc: dict[str, Any],
+        replacements_doc: dict[str, Any] | None = None,
+    ) -> tuple[str, list[dict[str, Any]]]:
+        iso = day.isoformat()
+        weekday = day.isoweekday()
+        week_type = self.week_type(day, schedule_doc, replacements_doc)
+        lessons: list[dict[str, Any]] = []
+        for item in schedule_doc.get("lessons", []):
+            if int(item.get("weekday", 0)) != weekday:
+                continue
+            if not self._valid_on(item, iso):
+                continue
+            if item.get("weekType", "all") not in ("all", week_type):
+                continue
+            lesson = clone_json(item)
+            lesson["weekTypeActual"] = week_type
+            lessons.append(lesson)
+
+        for rule in schedule_doc.get("replacementRules", []):
+            if int(rule.get("weekday", 0)) != weekday:
+                continue
+            if rule.get("weekType") not in ("all", week_type):
+                continue
+            if not self._valid_on(rule, iso):
+                continue
+            index = next(
+                (i for i, lesson in enumerate(lessons) if lesson.get("lessonId") == rule.get("originalLessonId")),
+                None,
+            )
+            if index is None:
+                continue
+            original = lessons[index]
+            lessons[index] = {
+                **original,
+                "subjectId": rule.get("newSubjectId", original.get("subjectId", "")),
+                "subject": rule.get("newSubject", original.get("subject", "")),
+                "teacher": rule.get("newTeacher", original.get("teacher", "")),
+                "room": rule.get("newRoom", original.get("room", "")),
+                "replacement": True,
+                "replacementKind": "rule",
+                "replacementRuleId": rule.get("ruleId", ""),
+                "originalSubject": original.get("subject", ""),
+                "originalTeacher": original.get("teacher", ""),
+                "originalRoom": original.get("room", ""),
+                "source": "schedule.json",
+            }
+
+        if replacements_doc:
+            for replacement in replacements_doc.get("items", []):
+                if replacement.get("date") != iso:
+                    continue
+                if replacement.get("weekType") and replacement.get("weekType") != week_type:
+                    continue
+                original_id = replacement.get("originalLessonId")
+                index = next(
+                    (i for i, lesson in enumerate(lessons) if original_id and lesson.get("lessonId") == original_id),
+                    None,
+                )
+                if index is None:
+                    pair = int(replacement.get("pairNumber", 0) or 0)
+                    index = next((i for i, lesson in enumerate(lessons) if int(lesson.get("pairNumber", 0)) == pair), None)
+                if replacement.get("cancelled"):
+                    if index is not None:
+                        lessons.pop(index)
+                    continue
+                if index is not None:
+                    original = lessons[index]
+                    lessons[index] = {
+                        **original,
+                        "subjectId": replacement.get("newSubjectId", original.get("subjectId", "")),
+                        "subject": replacement.get("newSubject", original.get("subject", "")),
+                        "teacher": replacement.get("newTeacher", original.get("teacher", "")),
+                        "room": replacement.get("newRoom", original.get("room", "")),
+                        "replacement": True,
+                        "replacementKind": "individual",
+                        "replacementId": replacement.get("replacementId", ""),
+                        "originalSubject": original.get("originalSubject") or original.get("subject", ""),
+                        "originalTeacher": original.get("originalTeacher") or original.get("teacher", ""),
+                        "originalRoom": original.get("originalRoom") or original.get("room", ""),
+                        "source": replacement.get("source", ""),
+                        "sourceHash": replacement.get("sourceHash", ""),
+                        "receivedAt": replacement.get("receivedAt", ""),
+                        "weekTypeActual": week_type,
+                    }
+                else:
+                    lessons.append({
+                        "lessonId": original_id or f"replacement-{replacement.get('pairNumber', 0)}",
+                        "weekday": weekday,
+                        "pairNumber": int(replacement.get("pairNumber", 0) or 0),
+                        "subjectId": replacement.get("newSubjectId", ""),
+                        "subject": replacement.get("newSubject", ""),
+                        "teacher": replacement.get("newTeacher", ""),
+                        "room": replacement.get("newRoom", ""),
+                        "subgroup": "all",
+                        "weekType": week_type,
+                        "weekTypeActual": week_type,
+                        "service": False,
+                        "replacement": True,
+                        "replacementKind": "individual",
+                        "replacementId": replacement.get("replacementId", ""),
+                        "originalSubject": replacement.get("originalSubject", ""),
+                        "originalRoom": "",
+                        "source": replacement.get("source", ""),
+                        "receivedAt": replacement.get("receivedAt", ""),
+                    })
+
+        lessons.sort(key=lambda item: (int(item.get("pairNumber", 0)), str(item.get("subject", ""))))
+        return week_type, lessons
+
+    def next_lesson(
+        self,
+        subject_id: str,
+        after: date,
+        schedule_doc: dict[str, Any],
+        replacements_doc: dict[str, Any] | None = None,
+        limit: int = 370,
+    ) -> dict[str, Any] | None:
+        for offset in range(1, limit + 1):
+            day = after + timedelta(days=offset)
+            _, lessons = self.effective_lessons(day, schedule_doc, replacements_doc)
+            for lesson in lessons:
+                if lesson.get("subjectId") == subject_id and not lesson.get("service"):
+                    return {**lesson, "date": day.isoformat()}
+        return None
+
+    @staticmethod
+    def subject_catalog(schedule_doc: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        catalog: dict[str, dict[str, Any]] = {}
+        for lesson in schedule_doc.get("lessons", []):
+            subject_id = str(lesson.get("subjectId", ""))
+            if not subject_id or lesson.get("service"):
+                continue
+            if subject_id not in catalog:
+                catalog[subject_id] = {
+                    "subjectId": subject_id,
+                    "subject": str(lesson.get("subject", subject_id)),
+                    "key": normalize_text(str(lesson.get("subject", subject_id))),
+                }
+        return catalog
+
+    @staticmethod
+    def times_by_pair(schedule_doc: dict[str, Any]) -> dict[int, dict[str, str]]:
+        return {
+            int(item.get("pairNumber", 0)): {"start": str(item.get("start", "")), "end": str(item.get("end", ""))}
+            for item in schedule_doc.get("times", [])
+        }
+
+
+# =============================================================================
+# Telegram-инфраструктура
+# =============================================================================
+
+
+class UpdateGuard:
+    """Не даёт обработать один Telegram update дважды, включая параллельную доставку."""
+
+    def __init__(self, local: LocalState):
+        self.local = local
+        self.lock = asyncio.Lock()
+        self.inflight: set[int] = set()
+
+    async def claim(self, update_id: int | None) -> bool:
+        if update_id is None:
+            return True
+        async with self.lock:
+            if update_id in self.inflight or self.local.has_update(update_id):
+                return False
+            self.inflight.add(update_id)
+            return True
+
+    def complete(self, update_id: int | None) -> None:
+        if update_id is None:
+            return
+        self.inflight.discard(update_id)
+        self.local.mark_update(update_id)
+
+    def release(self, update_id: int | None) -> None:
+        if update_id is not None:
+            self.inflight.discard(update_id)
+
+
+class Backend:
+    def __init__(
+        self,
+        config: Config,
+        storage: GitHubStorage | None = None,
+        local: LocalState | None = None,
+        quota: Quota | None = None,
+    ):
+        self.config = config
+        self.local = local or LocalState(config.bot_state_file)
+        self.quota = quota or Quota(
+            self.local,
+            config.gemini_rpm_limit,
+            config.gemini_rpd_limit,
+            config.gemini_tpm_limit,
+        )
+        self.storage = storage or GitHubStorage(config)
+        self.schedule = ScheduleService()
+        self.update_guard = UpdateGuard(self.local)
+        self.started_at = now_moscow()
+        self.batches: dict[int, Any] = {}
+        self.batch_lock = asyncio.Lock()
+
+    @property
+    def secrets(self) -> tuple[str, ...]:
+        return (
+            self.config.telegram_token,
+            self.config.github_token,
+            self.config.gemini_api_key,
+            self.config.vk_access_token or "",
+        )
+
+    def is_allowed(self, update: Any) -> bool:
+        user = getattr(update, "effective_user", None)
+        if user is None:
+            return False
+        try:
+            return int(user.id) in self.config.allowed_telegram_ids
+        except (TypeError, ValueError):
+            return False
+
+    async def read_documents(self) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+        return await asyncio.to_thread(self.storage.read_documents)
+
+    async def read_bundle(self) -> Bundle:
+        return await asyncio.to_thread(self.storage.read_bundle)
+
+    def queue_size(self) -> int:
+        return len(self.batches)
+
+
+backend: Backend | None = None
+
+
+def require_backend() -> Backend:
+    if backend is None:
+        raise RuntimeError("backend не инициализирован")
+    return backend
+
+
+def _message_of(update: Any) -> Any:
+    return getattr(update, "effective_message", None)
+
+
+async def reply_text(update: Any, text: str) -> None:
+    message = _message_of(update)
+    if message is None:
+        return
+    for chunk in chunk_lines(str(text).splitlines()):
+        try:
+            await message.reply_text(chunk, disable_web_page_preview=True)
+        except Exception as exc:  # sending must not crash the update loop
+            LOG.warning("telegram reply failed: %s", safe_exception(exc, require_backend().secrets))
+
+
+def authorized(handler: Callable[..., Any]) -> Callable[..., Any]:
+    """Allowlist + update_id guard + безопасные ответы на ошибки."""
+
+    @functools.wraps(handler)
+    async def wrapper(update: Any, context: Any) -> None:
+        current = require_backend()
+        if not current.is_allowed(update):
+            LOG.warning("rejected telegram user outside allowlist")
+            await reply_text(update, "Этот бот доступен только участникам группы 108М.")
+            return
+        update_id = getattr(update, "update_id", None)
+        if not await current.update_guard.claim(update_id):
+            return
+        try:
+            await handler(update, context)
+        except UserFacingError as exc:
+            await reply_text(update, str(exc))
+        except StorageBusyError:
+            await reply_text(update, "Публикация данных ещё не завершена. Повторите через минуту.")
+        except StorageError as exc:
+            LOG.error("storage error: %s", safe_exception(exc, current.secrets))
+            await reply_text(update, "Опубликованные данные повреждены или недоступны. Запись остановлена, повторите позже.")
+        except ExternalServiceError as exc:
+            LOG.warning("external service error: %s", safe_exception(exc, current.secrets))
+            await reply_text(update, "Внешний сервис недоступен. Данные не изменены; повторите позже.")
+        except Exception as exc:  # no traceback with possible secrets
+            LOG.error("handler failed: %s", safe_exception(exc, current.secrets))
+            await reply_text(update, "Внутренняя ошибка. Данные не изменены; повторите позже.")
+        finally:
+            current.update_guard.complete(update_id)
+
+    return wrapper
+
+
+def _week_type_ru(value: str) -> str:
+    return "знаменатель" if value == "denominator" else "числитель"
+
+
+def _format_lesson(lesson: dict[str, Any], times: dict[int, dict[str, str]]) -> str:
+    pair = int(lesson.get("pairNumber", 0))
+    clock = times.get(pair, {})
+    prefix = f"{pair}. {clock.get('start', '--:--')}–{clock.get('end', '--:--')} · {lesson.get('subject', '')}"
+    parts = [prefix]
+    if lesson.get("teacher"):
+        parts.append(str(lesson["teacher"]))
+    if lesson.get("room"):
+        parts.append(f"каб. {lesson['room']}")
+    if lesson.get("replacement"):
+        source = "правило недели" if lesson.get("replacementKind") == "rule" else "замена"
+        original = lesson.get("originalSubject")
+        parts.append(f"{source}" + (f" вместо «{original}»" if original else ""))
+    options = lesson.get("subgroupOptions") or []
+    if options:
+        parts.append(" / ".join(f"{item.get('id')}: каб. {item.get('room') or '—'}" for item in options))
+    return " · ".join(str(part) for part in parts if part)
+
+
+# =============================================================================
+# Команды
+# =============================================================================
+
+
+@authorized
+async def start_command(update: Any, context: Any) -> None:
+    await reply_text(
+        update,
+        "Привет! Это дневник группы 108М.\n\n"
+        "• Расписание, оценки, ДЗ, дежурства и замены — на сайте.\n"
+        "• ДЗ: «Математика выучить логарифмы 10.09».\n"
+        "• Дежурство: «Дежурили Абакаев, Бадреев, Осадчий».\n"
+        "• Журнал: отправь фото или альбом.\n"
+        "• Замены: перешли PDF из VK.\n\n"
+        "/help — подробная инструкция.",
+    )
+
+
+@authorized
+async def help_command(update: Any, context: Any) -> None:
+    await reply_text(
+        update,
+        "Как пользоваться ботом 108М\n\n"
+        "ДОМАШНЕЕ ЗАДАНИЕ\n"
+        "Формат: «Предмет текст задания [дата]».\n"
+        "Пример: «Математика выучить логарифмы 10.09».\n"
+        "Дата может быть в конце: ДД.ММ, ДД.ММ.ГГ или ДД.ММ.ГГГГ. Без даты берётся дата сообщения. "
+        "Задание появится на сайте под ближайшим уроком этого предмета строго после даты выдачи. "
+        "Замены и чётность недели учитываются. Повторное сообщение с тем же предметом и датой обновит текст.\n\n"
+        "ДЕЖУРСТВА\n"
+        "Сообщение: «Дежурили Абакаев, Бадреев, Осадчий».\n"
+        "Можно фамилию, имя или ФИО. Бот засчитает только однозначно найденных людей. "
+        "Если имя неоднозначное — попросит написать точнее и ничего не засчитает.\n\n"
+        "ЖУРНАЛ\n"
+        "Отправь фото страницы или Telegram-альбом. Бот сам определит момент окончания загрузки. "
+        "Максимум 20 изображений в одной загрузке; повторное фото по hash не отправляется в Gemini. "
+        "PDF и другие документы как журнал не принимаются.\n\n"
+        "ЗАМЕНЫ\n"
+        "Перешли PDF замен документом. Бот обработает только строки группы 108М. "
+        "PDF не публикуется и не исполняется.\n\n"
+        "КОМАНДЫ\n"
+        "/today — расписание, замены и ДЗ на сегодня\n"
+        "/grades — как смотреть оценки и сколько записей опубликовано\n"
+        "/duties — последние дежурства\n"
+        "/review — спорные оценки\n"
+        "/status — очередь, ревизия и квоты Gemini\n"
+        "/cancel — отменить незавершённую загрузку фото\n"
+        "/help — эта инструкция",
+    )
+
+
+@authorized
+async def today_command(update: Any, context: Any) -> None:
+    current = require_backend()
+    documents, _ = await current.read_documents()
+    day = today_moscow()
+    schedule_doc = documents["schedule.json"]
+    replacements_doc = documents["replacements.json"]
+    week_type, lessons = current.schedule.effective_lessons(day, schedule_doc, replacements_doc)
+    times = current.schedule.times_by_pair(schedule_doc)
+    lines = [f"Сегодня, {date_label_full(day)} · {_week_type_ru(week_type)}"]
+    if lessons:
+        lines.append("")
+        lines.extend(_format_lesson(lesson, times) for lesson in lessons)
+    else:
+        lines.append("Занятий нет.")
+    replacements = [
+        item for item in replacements_doc.get("items", [])
+        if item.get("date") == day.isoformat() and not item.get("cancelled")
+    ]
+    if replacements:
+        lines.append("")
+        lines.append(f"Замены для 108М: {len(replacements)}")
+        for item in replacements:
+            lines.append(
+                f"— {item.get('pairNumber')} пара: {item.get('newSubject')}"
+                + (f", каб. {item['newRoom']}" if item.get("newRoom") else "")
+                + f" (источник: {item.get('source', 'PDF')})"
+            )
+    tasks = [
+        task for task in documents["tasks.json"].get("tasks", [])
+        if task.get("nextLessonDate") == day.isoformat() and task.get("status") != "выполнено"
+    ]
+    if tasks:
+        lines.append("")
+        lines.append("Домашние задания к сегодняшним урокам:")
+        for task in tasks:
+            lines.append(f"— {task.get('subject')}: {task.get('text')}")
+    await reply_text(update, "\n".join(lines))
+
+
+@authorized
+async def grades_command(update: Any, context: Any) -> None:
+    current = require_backend()
+    documents, manifest = await current.read_documents()
+    grades = documents["grades.json"].get("grades", [])
+    pending = len([item for item in grades if item.get("status") in ("pending", "conflict")])
+    await reply_text(
+        update,
+        "Оценки смотри на сайте: раздел «Оценки» → выбери подгруппу и ученика.\n\n"
+        f"Записей в журнале: {len(grades)}\n"
+        f"Из них на проверке: {pending}\n"
+        f"Ревизия данных: {manifest.get('revision', '—')}\n\n"
+        "Низкоуверенные и конфликтные значения не заменяют подтверждённую оценку автоматически. "
+        "Спорные записи можно посмотреть и подтвердить командой /review.",
+    )
+
+
+@authorized
+async def status_command(update: Any, context: Any) -> None:
+    current = require_backend()
+    quota = current.quota.status()
+    revision = "—"
+    generated = "—"
+    try:
+        _, manifest = await current.read_documents()
+        revision = str(manifest.get("revision", "—"))
+        generated = str(manifest.get("generatedAt", "—"))
+    except (StorageError, StorageBusyError, ExternalServiceError) as exc:
+        LOG.warning("status read failed: %s", safe_exception(exc, current.secrets))
+    lines = [
+        f"Очередь фото: {current.queue_size()}",
+        f"Ревизия: {revision}",
+        f"Публикация: {generated}",
+        f"Gemini: {quota['rpm_used']}/{quota['rpm_limit']} за минуту, "
+        f"{quota['rpd_used']}/{quota['rpd_limit']} за день, "
+        f"{quota['tpm_used']}/{quota['tpm_limit']} токенов за минуту",
+        f"Модели: {', '.join(current.config.gemini_models)}",
+        f"Время Москвы: {iso_now()}",
+    ]
+    await reply_text(update, "\n".join(lines))
+
+
+async def error_handler(update: object, context: Any) -> None:
+    error = getattr(context, "error", None)
+    current = backend
+    secrets_value = current.secrets if current else ()
+    LOG.error("telegram update failed: %s", safe_exception(error or Exception("unknown"), secrets_value))
+    if isinstance(update, Update) and current and current.is_allowed(update):
+        try:
+            await reply_text(update, "Произошла ошибка. Данные не изменены; повторите позже.")
+        except Exception:
+            pass
+
+
+def build_application(config: Config) -> Any:
+    global backend
+    if Application is None:
+        raise ConfigError("Не установлены зависимости Telegram. Выполните: python -m pip install -r requirements.txt")
+    backend = Backend(config)
+    application = Application.builder().token(config.telegram_token).build()
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("today", today_command))
+    application.add_handler(CommandHandler("grades", grades_command))
+    application.add_handler(CommandHandler("status", status_command))
+    application.add_error_handler(error_handler)
+    return application
+
+
+def main() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except (AttributeError, OSError):
+            pass
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        print(f"Ошибка конфигурации: {exc}", file=sys.stderr)
+        raise SystemExit(2) from None
+    logging.basicConfig(
+        level=getattr(logging, config.log_level, logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("telegram").setLevel(logging.WARNING)
+    try:
+        application = build_application(config)
+    except ConfigError as exc:
+        print(f"Ошибка запуска: {exc}", file=sys.stderr)
+        raise SystemExit(2) from None
+    LOG.info("108M backend started; repository=%s branch=%s", config.github_repository, config.github_branch)
+    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=False)
+
+
+# __PART_4__
+
+if __name__ == "__main__":
+    main()
+
 
