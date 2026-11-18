@@ -1,14 +1,385 @@
 {
+  "generatedAt": "2026-11-18T07:33:41+03:00",
+  "lessons": [
+    {
+      "lessonId": "mon-1-important",
+      "pairNumber": 1,
+      "room": "",
+      "service": true,
+      "subgroup": "all",
+      "subject": "Разговоры о важном",
+      "subjectId": "important-talk",
+      "teacher": "",
+      "validFrom": "2026-09-01",
+      "weekType": "all",
+      "weekday": 1
+    },
+    {
+      "lessonId": "mon-2-math",
+      "pairNumber": 2,
+      "room": "2к302",
+      "service": false,
+      "subgroup": "all",
+      "subject": "Математика",
+      "subjectId": "math",
+      "teacher": "Кашаева",
+      "validFrom": "2026-09-01",
+      "weekType": "all",
+      "weekday": 1
+    },
+    {
+      "lessonId": "mon-3-english",
+      "pairNumber": 3,
+      "room": "2к207 / 2к202",
+      "service": false,
+      "subgroup": "split",
+      "subgroupOptions": [
+        {
+          "id": "2к207",
+          "room": "2к207",
+          "teacher": ""
+        },
+        {
+          "id": "2к202",
+          "room": "2к202",
+          "teacher": ""
+        }
+      ],
+      "subject": "Иностранный язык",
+      "subjectId": "english",
+      "teacher": "",
+      "validFrom": "2026-09-01",
+      "weekType": "all",
+      "weekday": 1
+    },
+    {
+      "lessonId": "mon-4-obizr",
+      "pairNumber": 4,
+      "room": "2к407",
+      "service": false,
+      "subgroup": "all",
+      "subject": "ОБиЗР",
+      "subjectId": "obizr",
+      "teacher": "Жукова",
+      "validFrom": "2026-09-01",
+      "weekType": "all",
+      "weekday": 1
+    },
+    {
+      "lessonId": "mon-5-russian",
+      "pairNumber": 5,
+      "room": "2к307",
+      "service": false,
+      "subgroup": "all",
+      "subject": "Русский язык",
+      "subjectId": "russian",
+      "teacher": "Марцынкевич",
+      "validFrom": "2026-09-01",
+      "weekType": "all",
+      "weekday": 1
+    },
+    {
+      "lessonId": "tue-1-intro",
+      "pairNumber": 1,
+      "room": "",
+      "service": false,
+      "subgroup": "all",
+      "subject": "Введение в специальность",
+      "subjectId": "intro",
+      "teacher": "Мингазова",
+      "validFrom": "2026-09-01",
+      "weekType": "all",
+      "weekday": 2
+    },
+    {
+      "lessonId": "tue-2-math",
+      "pairNumber": 2,
+      "room": "2к302",
+      "service": false,
+      "subgroup": "all",
+      "subject": "Математика",
+      "subjectId": "math",
+      "teacher": "Кашаева",
+      "validFrom": "2026-09-01",
+      "weekType": "all",
+      "weekday": 2
+    },
+    {
+      "lessonId": "tue-3-chemistry",
+      "pairNumber": 3,
+      "room": "2к105",
+      "service": false,
+      "subgroup": "all",
+      "subject": "Химия",
+      "subjectId": "chemistry",
+      "teacher": "Мусина",
+      "validFrom": "2026-09-01",
+      "weekType": "all",
+      "weekday": 2
+    },
+    {
+      "lessonId": "tue-4-russian",
+      "pairNumber": 4,
+      "room": "2к307",
+      "service": false,
+      "subgroup": "all",
+      "subject": "Русский язык",
+      "subjectId": "russian",
+      "teacher": "Марцынкевич",
+      "validFrom": "2026-09-01",
+      "weekType": "all",
+      "weekday": 2
+    },
+    {
+      "lessonId": "wed-1-russian",
+      "pairNumber": 1,
+      "room": "2к307",
+      "service": false,
+      "subgroup": "all",
+      "subject": "Русский язык",
+      "subjectId": "russian",
+      "teacher": "Марцынкевич",
+      "validFrom": "2026-09-01",
+      "weekType": "all",
+      "weekday": 3
+    },
+    {
+      "lessonId": "wed-2-russian",
+      "pairNumber": 2,
+      "room": "2к307",
+      "service": false,
+      "subgroup": "all",
+      "subject": "Русский язык",
+      "subjectId": "russian",
+      "teacher": "Марцынкевич",
+      "validFrom": "2026-09-01",
+      "weekType": "all",
+      "weekday": 3
+    },
+    {
+      "lessonId": "wed-3-english",
+      "pairNumber": 3,
+      "room": "2к207 / 2к202",
+      "service": false,
+      "subgroup": "split",
+      "subgroupOptions": [
+        {
+          "id": "2к207",
+          "room": "2к207",
+          "teacher": ""
+        },
+        {
+          "id": "2к202",
+          "room": "2к202",
+          "teacher": ""
+        }
+      ],
+      "subject": "Иностранный язык",
+      "subjectId": "english",
+      "teacher": "",
+      "validFrom": "2026-09-01",
+      "weekType": "all",
+      "weekday": 3
+    },
+    {
+      "lessonId": "wed-4-literature",
+      "pairNumber": 4,
+      "room": "2к301",
+      "service": false,
+      "subgroup": "all",
+      "subject": "Родная литература",
+      "subjectId": "literature",
+      "teacher": "Садыкова",
+      "validFrom": "2026-09-01",
+      "weekType": "all",
+      "weekday": 3
+    },
+    {
+      "lessonId": "thu-1-horizons",
+      "pairNumber": 1,
+      "room": "",
+      "service": true,
+      "subgroup": "all",
+      "subject": "Россия — мои горизонты",
+      "subjectId": "horizons",
+      "teacher": "",
+      "validFrom": "2026-09-01",
+      "weekType": "all",
+      "weekday": 4
+    },
+    {
+      "lessonId": "thu-2-biology",
+      "pairNumber": 2,
+      "room": "Л307",
+      "service": false,
+      "subgroup": "all",
+      "subject": "Биология",
+      "subjectId": "biology",
+      "teacher": "Кипрова",
+      "validFrom": "2026-09-01",
+      "weekType": "all",
+      "weekday": 4
+    },
+    {
+      "lessonId": "thu-3-informatics",
+      "pairNumber": 3,
+      "room": "406",
+      "service": false,
+      "subgroup": "all",
+      "subject": "Информатика",
+      "subjectId": "informatics",
+      "teacher": "Филенкова",
+      "validFrom": "2026-09-01",
+      "weekType": "all",
+      "weekday": 4
+    },
+    {
+      "lessonId": "thu-4-history",
+      "pairNumber": 4,
+      "room": "227",
+      "service": false,
+      "subgroup": "all",
+      "subject": "История",
+      "subjectId": "history",
+      "teacher": "Батыкова",
+      "validFrom": "2026-09-01",
+      "weekType": "all",
+      "weekday": 4
+    },
+    {
+      "lessonId": "fri-1-pe",
+      "pairNumber": 1,
+      "room": "",
+      "service": false,
+      "subgroup": "all",
+      "subject": "Физическая культура",
+      "subjectId": "pe",
+      "teacher": "",
+      "validFrom": "2026-09-01",
+      "weekType": "all",
+      "weekday": 5
+    },
+    {
+      "lessonId": "fri-2-pe",
+      "pairNumber": 2,
+      "room": "",
+      "service": false,
+      "subgroup": "all",
+      "subject": "Физическая культура",
+      "subjectId": "pe",
+      "teacher": "",
+      "validFrom": "2026-09-01",
+      "weekType": "all",
+      "weekday": 5
+    },
+    {
+      "lessonId": "fri-3-pe",
+      "pairNumber": 3,
+      "room": "",
+      "service": false,
+      "subgroup": "all",
+      "subject": "Физическая культура",
+      "subjectId": "pe",
+      "teacher": "Федосеев",
+      "validFrom": "2026-09-01",
+      "weekType": "all",
+      "weekday": 5
+    },
+    {
+      "lessonId": "fri-4-history",
+      "pairNumber": 4,
+      "room": "227",
+      "service": false,
+      "subgroup": "all",
+      "subject": "История",
+      "subjectId": "history",
+      "teacher": "Батыкова",
+      "validFrom": "2026-09-01",
+      "weekType": "all",
+      "weekday": 5
+    }
+  ],
+  "meta": {
+    "firstWeekType": "numerator",
+    "group": "108М",
+    "timezone": "Europe/Moscow",
+    "weekAnchor": "2026-09-01"
+  },
+  "replacementRules": [
+    {
+      "newRoom": "406",
+      "newSubject": "Информатика",
+      "newSubjectId": "informatics",
+      "newTeacher": "Филенкова",
+      "originalLessonId": "thu-4-history",
+      "pairNumber": 4,
+      "ruleId": "thu-denominator-history-to-informatics",
+      "validFrom": "2026-09-01",
+      "weekType": "denominator",
+      "weekday": 4
+    },
+    {
+      "newRoom": "2к302",
+      "newSubject": "Математика",
+      "newSubjectId": "math",
+      "newTeacher": "Кашаева",
+      "originalLessonId": "fri-1-pe",
+      "pairNumber": 1,
+      "ruleId": "fri-denominator-pe-to-math-1",
+      "validFrom": "2026-09-01",
+      "weekType": "denominator",
+      "weekday": 5
+    },
+    {
+      "newRoom": "2к302",
+      "newSubject": "Математика",
+      "newSubjectId": "math",
+      "newTeacher": "Кашаева",
+      "originalLessonId": "fri-2-pe",
+      "pairNumber": 2,
+      "ruleId": "fri-denominator-pe-to-math-2",
+      "validFrom": "2026-09-01",
+      "weekType": "denominator",
+      "weekday": 5
+    }
+  ],
+  "revision": "seed-2026-11-18",
   "schemaVersion": 1,
-  "revision": "demo-2",
-  "generatedAt": "2026-11-13T00:00:00+03:00",
-  "meta": {"timezone":"Europe/Moscow","weekAnchor":"2026-09-01","firstWeekType":"numerator"},
-  "times":[{"pairNumber":1,"start":"08:30","end":"10:00"},{"pairNumber":2,"start":"10:10","end":"11:40"},{"pairNumber":3,"start":"12:10","end":"13:40"},{"pairNumber":4,"start":"13:50","end":"15:20"},{"pairNumber":5,"start":"15:25","end":"16:55"},{"pairNumber":6,"start":"17:05","end":"18:35"},{"pairNumber":7,"start":"18:40","end":"20:10"}],
-  "lessons":[
-    {"weekday":1,"pairNumber":1,"subjectId":"math","subject":"Математика","teacher":"Кашаева","room":"2к302","weekType":"all"},{"weekday":1,"pairNumber":2,"subjectId":"english","subject":"Иностранный язык","teacher":"","room":"2к207 / 2к202","subgroup":"english","weekType":"all"},{"weekday":1,"pairNumber":3,"subjectId":"obizr","subject":"ОБиЗР","teacher":"Жукова","room":"2к407","weekType":"all"},{"weekday":1,"pairNumber":4,"subjectId":"russian","subject":"Русский язык","teacher":"Марцынкевич","room":"2к307","weekType":"all"},
-    {"weekday":2,"pairNumber":1,"subjectId":"intro","subject":"Введение в специальность","teacher":"Мингазова","room":"","weekType":"all"},{"weekday":2,"pairNumber":2,"subjectId":"math","subject":"Математика","teacher":"Кашаева","room":"2к302","weekType":"all"},{"weekday":2,"pairNumber":3,"subjectId":"chemistry","subject":"Химия","teacher":"Мусина","room":"2к105","weekType":"all"},{"weekday":2,"pairNumber":4,"subjectId":"russian","subject":"Русский язык","teacher":"Марцынкевич","room":"2к307","weekType":"all"},
-    {"weekday":3,"pairNumber":1,"subjectId":"russian","subject":"Русский язык","teacher":"Марцынкевич","room":"2к307","weekType":"all"},{"weekday":3,"pairNumber":2,"subjectId":"russian","subject":"Русский язык","teacher":"Марцынкевич","room":"2к307","weekType":"all"},{"weekday":3,"pairNumber":3,"subjectId":"english","subject":"Иностранный язык","teacher":"","room":"2к207 / 2к202","subgroup":"english","weekType":"all"},{"weekday":3,"pairNumber":4,"subjectId":"literature","subject":"Родная литература","teacher":"Садыкова","room":"2к301","weekType":"all"},
-    {"weekday":4,"pairNumber":1,"subjectId":"horizons","subject":"Россия — мои горизонты","teacher":"","room":"","weekType":"all","service":true},{"weekday":4,"pairNumber":2,"subjectId":"biology","subject":"Биология","teacher":"Кипрова","room":"Л307","weekType":"all"},{"weekday":4,"pairNumber":3,"subjectId":"informatics","subject":"Информатика","teacher":"Филенкова","room":"406","weekType":"all"},{"weekday":4,"pairNumber":4,"subjectId":"history","subject":"История","teacher":"Батыкова","room":"227","weekType":"numerator"},{"weekday":4,"pairNumber":4,"subjectId":"informatics","subject":"Информатика","teacher":"Филенкова","room":"406","weekType":"denominator"},
-    {"weekday":5,"pairNumber":1,"subjectId":"pe","subject":"Физическая культура","teacher":"","room":"","weekType":"all"},{"weekday":5,"pairNumber":2,"subjectId":"pe","subject":"Физическая культура","teacher":"","room":"2к302","weekType":"all"},{"weekday":5,"pairNumber":3,"subjectId":"pe","subject":"Физическая культура","teacher":"Федосеев","room":"","weekType":"all"},{"weekday":5,"pairNumber":4,"subjectId":"history","subject":"История","teacher":"Батыкова","room":"227","weekType":"all"}
+  "times": [
+    {
+      "end": "10:00",
+      "pairNumber": 1,
+      "start": "08:30"
+    },
+    {
+      "end": "11:40",
+      "pairNumber": 2,
+      "start": "10:10"
+    },
+    {
+      "end": "13:40",
+      "pairNumber": 3,
+      "start": "12:10"
+    },
+    {
+      "end": "15:20",
+      "pairNumber": 4,
+      "start": "13:50"
+    },
+    {
+      "end": "16:55",
+      "pairNumber": 5,
+      "start": "15:25"
+    },
+    {
+      "end": "18:35",
+      "pairNumber": 6,
+      "start": "17:05"
+    },
+    {
+      "end": "20:10",
+      "pairNumber": 7,
+      "start": "18:40"
+    }
   ]
 }

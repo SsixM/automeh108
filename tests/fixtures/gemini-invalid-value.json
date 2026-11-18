@@ -1,0 +1,21 @@
+{
+  "document": {
+    "group": "108М",
+    "subject": "Химия",
+    "orientation": 0
+  },
+  "cells": [
+    {
+      "studentHint": "Аглиуллина Самира",
+      "studentId": "s01",
+      "date": "2026-11-13",
+      "raw": "6",
+      "value": "6",
+      "entryType": "daily",
+      "confidence": 0.8,
+      "alternatives": [],
+      "reason": ""
+    }
+  ],
+  "warnings": []
+}

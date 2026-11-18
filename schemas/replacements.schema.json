@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "replacements.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "revision", "generatedAt", "items"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "revision": {"type": "string", "minLength": 1},
+    "generatedAt": {"type": "string", "format": "date-time"},
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["replacementId", "date", "weekType", "pairNumber", "newSubjectId", "newSubject", "newRoom", "cancelled", "source", "sourceHash", "receivedAt", "group"],
+        "properties": {
+          "replacementId": {"type": "string", "minLength": 8},
+          "date": {"type": "string", "format": "date"},
+          "weekType": {"enum": ["numerator", "denominator"]},
+          "pairNumber": {"type": "integer", "minimum": 1, "maximum": 7},
+          "originalLessonId": {"type": "string"},
+          "originalSubject": {"type": "string"},
+          "newSubjectId": {"type": "string", "minLength": 2},
+          "newSubject": {"type": "string", "minLength": 2},
+          "newTeacher": {"type": "string"},
+          "newRoom": {"type": "string"},
+          "cancelled": {"type": "boolean"},
+          "source": {"type": "string", "minLength": 2},
+          "sourceUrl": {"type": "string"},
+          "sourceHash": {"type": "string", "minLength": 16},
+          "receivedAt": {"type": "string", "format": "date-time"},
+          "group": {"const": "108М"}
+        }
+      }
+    }
+  }
+}

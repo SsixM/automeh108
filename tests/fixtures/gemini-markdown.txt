@@ -1,0 +1,28 @@
+Here is the JSON you asked for:
+
+```json
+{
+  "document": {
+    "group": "108М",
+    "subject": "Химия",
+    "subjectId": "chemistry",
+    "orientation": 0
+  },
+  "cells": [
+    {
+      "studentHint": "Аглиуллина Самира",
+      "studentId": "s01",
+      "date": "2026-11-13",
+      "raw": "5",
+      "value": "5",
+      "entryType": "daily",
+      "confidence": 0.96,
+      "alternatives": [],
+      "reason": ""
+    }
+  ],
+  "warnings": []
+}
+```
+
+Done.

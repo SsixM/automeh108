@@ -1,0 +1,22 @@
+{
+  "document": {
+    "group": "108М",
+    "subject": "Математика",
+    "subjectId": "math",
+    "orientation": 90
+  },
+  "cells": [
+    {
+      "studentHint": "Алборов Михаил",
+      "studentId": "s02",
+      "date": "2026-11-16",
+      "raw": "Н",
+      "value": "4",
+      "entryType": "daily",
+      "confidence": 0.55,
+      "alternatives": ["4"],
+      "reason": "handwritten mark looks like H or 4"
+    }
+  ],
+  "warnings": ["Рукописный символ похож на Н и 4 одновременно"]
+}

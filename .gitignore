@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Local secrets and runtime state
+.env
+.env.*
+!.env.example
+bot_state.local.json
+vk_tokens.json
+1.py
+*.log
+*.tmp
+
+# Uploaded source documents and generated media
+uploads/
+tmp/
+*.pdf
+*.jpg
+*.jpeg
+*.png
+*.webp
+
+# Browser test artifacts
+node_modules/
+playwright-report/
+test-results/
+screenshots/
+
+# Editors
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
