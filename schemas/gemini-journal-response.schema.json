@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Gemini journal recognition response",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["document", "cells", "warnings"],
+  "properties": {
+    "document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["group", "subject", "orientation"],
+      "properties": {
+        "group": {"const": "108М"},
+        "subject": {"type": "string"},
+        "subjectId": {"type": "string"},
+        "orientation": {"enum": [0, 90, 180, 270]}
+      }
+    },
+    "cells": {
+      "type": "array",
+      "maxItems": 5000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["studentHint", "studentId", "date", "raw", "value", "entryType", "confidence", "alternatives", "reason"],
+        "properties": {
+          "studentHint": {"type": "string"},
+          "studentId": {"type": "string"},
+          "date": {"type": "string", "format": "date"},
+          "raw": {"type": "string"},
+          "value": {"enum": ["2", "3", "4", "5", "н/б"]},
+          "entryType": {"enum": ["daily", "attendance", "attestation"]},
+          "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+          "alternatives": {"type": "array", "items": {"enum": ["2", "3", "4", "5", "н/б"]}},
+          "reason": {"type": "string"}
+        }
+      }
+    },
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "metadata": {"type": "object"}
+  }
+}

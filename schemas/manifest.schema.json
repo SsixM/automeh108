@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "manifest.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "revision", "generatedAt", "files"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "revision": {"type": "string", "minLength": 1},
+    "generatedAt": {"type": "string", "format": "date-time"},
+    "files": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["students.json", "schedule.json", "grades.json", "tasks.json", "duties.json", "replacements.json", "reviews.json"],
+      "properties": {
+        "students.json": {"type": "string", "minLength": 1},
+        "schedule.json": {"type": "string", "minLength": 1},
+        "grades.json": {"type": "string", "minLength": 1},
+        "tasks.json": {"type": "string", "minLength": 1},
+        "duties.json": {"type": "string", "minLength": 1},
+        "replacements.json": {"type": "string", "minLength": 1},
+        "reviews.json": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

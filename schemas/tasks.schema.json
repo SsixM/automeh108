@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tasks.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "revision", "generatedAt", "tasks"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "revision": {"type": "string", "minLength": 1},
+    "generatedAt": {"type": "string", "format": "date-time"},
+    "tasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["taskId", "subjectId", "subject", "text", "assignedDate", "nextLessonDate", "nextLessonId", "status", "createdAt", "updatedAt", "sourceUserId"],
+        "properties": {
+          "taskId": {"type": "string", "minLength": 8},
+          "subjectId": {"type": "string", "minLength": 2},
+          "subject": {"type": "string", "minLength": 2},
+          "text": {"type": "string", "minLength": 1},
+          "assignedDate": {"type": "string", "format": "date"},
+          "nextLessonDate": {"type": "string", "format": "date"},
+          "nextLessonId": {"type": "string", "minLength": 3},
+          "originalNextLessonDate": {"type": "string", "format": "date"},
+          "status": {"enum": ["актуальное", "выполнено", "просрочено", "перенесено"]},
+          "movedByReplacement": {"type": "boolean"},
+          "createdAt": {"type": "string", "format": "date-time"},
+          "updatedAt": {"type": "string", "format": "date-time"},
+          "completedAt": {"type": "string", "format": "date-time"},
+          "sourceUserId": {"type": "integer"},
+          "sourceUpdateId": {"type": "integer"},
+          "attachments": {
+            "type": "array",
+            "maxItems": 6,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["attachmentId", "url", "fileName", "mimeType", "size", "sha256", "createdAt"],
+              "properties": {
+                "attachmentId": {"type": "string", "minLength": 8},
+                "url": {"type": "string", "pattern": "^https://"},
+                "fileName": {"type": "string", "minLength": 1, "maxLength": 120},
+                "mimeType": {"enum": ["image/jpeg", "image/png", "image/webp"]},
+                "size": {"type": "integer", "minimum": 1, "maximum": 8388608},
+                "width": {"type": "integer", "minimum": 1, "maximum": 20000},
+                "height": {"type": "integer", "minimum": 1, "maximum": 20000},
+                "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+                "createdAt": {"type": "string", "format": "date-time"}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

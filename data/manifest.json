@@ -1,1 +1,14 @@
-{"schemaVersion":1,"revision":"demo-2","generatedAt":"2026-11-13T00:00:00+03:00","files":{"students.json":{},"schedule.json":{},"grades.json":{},"tasks.json":{},"duties.json":{},"replacements.json":{},"reviews.json":{}}}
+{
+  "files": {
+    "duties.json": "seed-2026-11-18",
+    "grades.json": "seed-2026-11-18",
+    "replacements.json": "seed-2026-11-18",
+    "reviews.json": "seed-2026-11-18",
+    "schedule.json": "seed-2026-11-18",
+    "students.json": "seed-2026-11-18",
+    "tasks.json": "seed-2026-11-18"
+  },
+  "generatedAt": "2026-11-18T07:33:41+03:00",
+  "revision": "seed-2026-11-18",
+  "schemaVersion": 1
+}

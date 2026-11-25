@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "reviews.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "revision", "generatedAt", "items"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "revision": {"type": "string", "minLength": 1},
+    "generatedAt": {"type": "string", "format": "date-time"},
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["reviewId", "gradeId", "studentId", "subjectId", "subject", "lessonDate", "entryType", "oldValue", "newValue", "oldConfidence", "newConfidence", "reason", "status", "createdAt", "candidate"],
+        "properties": {
+          "reviewId": {"type": "string", "minLength": 8},
+          "gradeId": {"type": "string", "minLength": 8},
+          "studentId": {"type": "string", "pattern": "^s[0-9]{2}$"},
+          "subjectId": {"type": "string", "minLength": 2},
+          "subject": {"type": "string", "minLength": 2},
+          "lessonDate": {"type": "string", "format": "date"},
+          "entryType": {"enum": ["daily", "attendance", "attestation"]},
+          "oldValue": {"enum": ["2", "3", "4", "5", "н/б"]},
+          "newValue": {"enum": ["2", "3", "4", "5", "н/б"]},
+          "oldConfidence": {"type": "number", "minimum": 0, "maximum": 1},
+          "newConfidence": {"type": "number", "minimum": 0, "maximum": 1},
+          "reason": {"type": "string", "minLength": 1},
+          "status": {"enum": ["pending", "confirmed", "rejected"]},
+          "createdAt": {"type": "string", "format": "date-time"},
+          "resolvedAt": {"type": "string", "format": "date-time"},
+          "resolvedBy": {"type": "integer"},
+          "candidate": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["gradeId", "studentId", "subjectId", "subject", "lessonDate", "entryType", "value", "raw", "confidence", "source", "status", "evidence"],
+            "properties": {
+              "gradeId": {"type": "string", "minLength": 8},
+              "studentId": {"type": "string", "pattern": "^s[0-9]{2}$"},
+              "subjectId": {"type": "string", "minLength": 2},
+              "subject": {"type": "string", "minLength": 2},
+              "lessonDate": {"type": "string", "format": "date"},
+              "entryType": {"enum": ["daily", "attendance", "attestation"]},
+              "value": {"enum": ["2", "3", "4", "5", "н/б"]},
+              "raw": {"type": "string"},
+              "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+              "source": {"type": "string", "minLength": 2},
+              "sourceHash": {"type": "string"},
+              "model": {"type": "string"},
+              "promptVersion": {"type": "string"},
+              "recognitionSchemaVersion": {"type": "string"},
+              "recognisedAt": {"type": "string", "format": "date-time"},
+              "status": {"enum": ["confirmed", "automatic", "pending", "conflict"]},
+              "evidence": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+            }
+          }
+        }
+      }
+    }
+  }
+}
